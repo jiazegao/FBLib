@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdint>
+
 namespace FBLib {
 
     struct PIDGains {
@@ -16,7 +18,7 @@ namespace FBLib {
         PIDGains getGains() const;
         void setGains(const PIDGains& gains);
 
-        float update(float error, float dt);
+        float update(float error);
         void reset();
 
         void setFlipReset(bool flipReset);
@@ -29,5 +31,8 @@ namespace FBLib {
         bool mFlipReset;
         float mIntegral = 0.0f;
         float mPreviousError = 0.0f;
+        float mFilteredDerivative = 0.0f;
+        float mDerivativeFilter = 0.1f;  // Low-pass filter coefficient (0.0 to 1.0)
+        uint32_t mPreviousTime = 0;  // Previous time in milliseconds
     };
 }
