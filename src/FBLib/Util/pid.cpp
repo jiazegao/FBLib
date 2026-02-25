@@ -1,4 +1,5 @@
-#include "FBLib/pid.hpp"
+#include "FBLib/Util/Util.hpp"
+#include "FBLib/Util/pid.hpp"
 #include "pros/rtos.hpp"
 
 namespace FBLib {

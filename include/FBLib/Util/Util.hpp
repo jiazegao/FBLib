@@ -1,7 +1,7 @@
 #pragma once
 #include <stdint.h>
 
-namespace FBlib {
+namespace FBLib {
     using Number = double;
 
     struct Pose {
@@ -9,7 +9,4 @@ namespace FBlib {
         Number y{0};
         Number theta{0}; // in radians
     };
-
-    
-
-} // namespace FBLib
+}
