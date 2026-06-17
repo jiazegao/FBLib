@@ -1,8 +1,8 @@
 #include "FBLib/Util/Util.hpp"
-#include "FBLib/Util/pid.hpp"
+#include "FBLib/Util/Pid.hpp"
 #include "pros/rtos.hpp"
 
-namespace FBLib {
+namespace FBLIB {
     // PID 
 PID::PID(float kP,          // Proportional gain
          float kI,          // Integral gain
@@ -26,6 +26,9 @@ PID::PID(float kP,          // Proportional gain
         // Get current time in milliseconds and compute dt
         uint32_t currentTime = pros::millis();
         float dt = (currentTime - mPreviousTime) / 1000.0f;  // Convert to seconds
+        // Clamp dt to prevent integral windup on first update after construction
+        // or after a long pause between updates (e.g., post-calibration).
+        if (dt > 0.1f) dt = 0.1f;
         mPreviousTime = currentTime;
 
         // proportional term
@@ -59,12 +62,16 @@ PID::PID(float kP,          // Proportional gain
 
     void PID::reset() {
         if (mFlipReset) {
+            // Negate the integral so it opposes the opposite direction — this
+            // prevents the robot from lurching when the target direction flips.
             mIntegral = -mIntegral;
-            mPreviousError = -mPreviousError;
         } else {
             mIntegral = 0.0f;
-            mPreviousError = 0.0f;
         }
+        // Always zero previous error — negating it (the old LemLib behavior)
+        // causes a derivative kick because the new motion's error has no
+        // relationship to the old error's negated magnitude.
+        mPreviousError = 0.0f;
         mFilteredDerivative = 0.0f;
         mPreviousTime = pros::millis();  // Reset time to current
     }

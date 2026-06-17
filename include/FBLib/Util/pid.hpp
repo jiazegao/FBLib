@@ -2,20 +2,12 @@
 
 #include <cstdint>
 
-namespace FBLib {
+namespace FBLIB {
 
 struct PIDGains {
     float kP = 0.0f;
     float kI = 0.0f;
     float kD = 0.0f;
-};
-
-struct PIDSettings {
-    float kP;
-    float kI;
-    float kD;
-    float windUpRange;
-    bool flipReset;
 };
 
 class PID {
