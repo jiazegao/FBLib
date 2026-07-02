@@ -172,6 +172,7 @@ Pose Chassis::getPose() const {
 
 void Chassis::tank(float left, float right) {
     if (mDryRun) return;
+    if (mMotionRunning) return;   // yield to async motion
     float l = mThrottleCurve.apply(left);
     float r = mThrottleCurve.apply(right);
     mDrivetrain.setVoltage(l, r);
@@ -179,6 +180,7 @@ void Chassis::tank(float left, float right) {
 
 void Chassis::arcade(float throttle, float steer) {
     if (mDryRun) return;
+    if (mMotionRunning) return;   // yield to async motion
     float t = mThrottleCurve.apply(throttle);
     float s = mSteerCurve.apply(steer);
 
@@ -198,6 +200,7 @@ void Chassis::arcade(float throttle, float steer) {
 void Chassis::curvature(float throttle, float steer) {
     // Curvature drive: inside wheel slows proportionally during turns
     if (mDryRun) return;
+    if (mMotionRunning) return;   // yield to async motion
     float t = mThrottleCurve.apply(throttle);
     float s = mSteerCurve.apply(steer);
 

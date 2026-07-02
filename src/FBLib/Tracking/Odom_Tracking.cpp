@@ -221,14 +221,15 @@ void OdomTracking::reset() {
 }
 
 void OdomTracking::calibrate() {
-    // Calibrate all IMUs
+    // Calibrate all IMUs.
+    // Use blocking mode (true) so we don't need a blind delay — the call returns
+    // only after calibration completes (~2s).  Without blocking, reset(false)
+    // starts calibration but returns immediately, leading to premature reads.
     for (auto* imu : mSensors.imuCollection) {
         if (imu != nullptr) {
-            imu->reset();
+            imu->reset(true);
         }
     }
-    // Wait for IMU calibration to settle (PROS docs recommend ~2 seconds)
-    pros::delay(2000);
     reset();
 }
 
