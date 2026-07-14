@@ -83,11 +83,20 @@ std::array<Pose, MAX_DISTANCE_SENSORS> sensorMounts = {{
 
 // Full chassis configuration
 ChassisConfig chassisConfig = {
-    // PID gains — tuned for 450 RPM, 3.25" wheels, 10.4" track
-    // Angular errors are in radians (0 to ±π), so P needs to be higher
-    // than lateral P (which sees inch-scale errors).
-    .lateralGains     = { 5.0f, 0.0f, 5.0f },
-    .angularGains     = { 50.0f, 0.0f, 6.0f },
+    // PID gains — starting points for 450 RPM, 3.25" wheels, 10.4" track.
+    // Units: lateral error in INCHES, angular error in RADIANS (0 to ±π),
+    // derivative per-second, output ±127.
+    //
+    //   Lateral kP=10 → full power beyond ~12.7" error, proportional
+    //     braking over the final foot. kD=0.3 → ~-18 damping at 60 in/s.
+    //   Angular kP=100 → full power beyond ~73° error; a 10° trim still
+    //     gets ~17 output. kD=5 ≈ LemLib default damping in rad/s units.
+    //
+    // Tuning: raise kP until it overshoots/oscillates, then raise kD until
+    // the overshoot disappears. Tune angular FIRST (moveToPoint uses both).
+    // Keep kI=0 unless steady-state error persists.
+    .lateralGains     = { 10.0f, 0.0f, 0.3f },
+    .angularGains     = { 100.0f, 0.0f, 5.0f },
     .lateralWindupRange = 0.0f,
     .angularWindupRange = 0.0f,
 

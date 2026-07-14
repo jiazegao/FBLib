@@ -80,9 +80,25 @@ struct DriveCurve {
 // ============================================================================
 
 struct ChassisConfig {
-    // PID gains
-    PIDGains lateralGains{7.0f, 0.0f, 30.0f};
-    PIDGains angularGains{4.0f, 0.0f, 37.7f};
+    // ========================================================================
+    // PID gains — defaults derived for a typical 6-motor blue (450 RPM) drive
+    // with 3.25" wheels. Error/output units (see PID::update):
+    //   Lateral:  error inches,  derivative per-second, output ±127
+    //   Angular:  error RADIANS, derivative per-second, output ±127
+    //
+    // Lateral kP=10 → output saturates beyond 12.7" error (proportional
+    // braking over the final foot). kD=0.3 → ~-18 damping at a 60 in/s
+    // approach. Angular kP=100 → saturates beyond ~73° error while a 10°
+    // trim still gets ~17 output (enough to move against friction);
+    // kD=5 ≈ LemLib's default angular damping converted to rad/sec units.
+    //
+    // Tune on your robot: raise kP until the motion overshoots/oscillates,
+    // then raise kD until the overshoot disappears. Tune angular first
+    // (moveToPoint uses both). Leave kI=0 unless a steady-state error
+    // persists — then start kI at ~kP/10 with a windup range set.
+    // ========================================================================
+    PIDGains lateralGains{10.0f, 0.0f, 0.3f};
+    PIDGains angularGains{100.0f, 0.0f, 5.0f};
 
     // Lateral PID settings
     float lateralWindupRange{0.0f};
