@@ -167,14 +167,23 @@ void AutonSelector::enableDryRun(Chassis& chassis, PathPreview& preview) {
 void AutonSelector::runDryRun() {
     if (mChassis == nullptr || mPreview == nullptr) return;
 
+    // Save the robot's REAL pose — the dry-run seeds the simulation with
+    // setPose, which also propagates to odometry and reinitializes MCL
+    // particles. Without restoring afterwards, every preview button press
+    // teleported the robot's localization to the origin.
+    Pose savedPose = mChassis->getPose();
+
     mPreview->clear();
-    mChassis->setPose({0.0f, 0.0f, 0.0f});   // default: origin
     mChassis->setDryRun(true);
+    mChassis->setPose({0.0f, 0.0f, 0.0f});   // default: origin (simulated)
     forceRunSelected();                        // auton may call setPose to override origin
     mPreview->setDynamicPath(mChassis->dryRunPath());
     mPreview->draw();
     mChassis->setDryRun(false);
     mChassis->resetDryRunPath();
+
+    // Restore real localization (odometry pose + MCL particles + RCL estimate)
+    mChassis->setPose(savedPose);
 }
 
 // ============================================================================

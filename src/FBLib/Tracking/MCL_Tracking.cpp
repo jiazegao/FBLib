@@ -160,8 +160,22 @@ void MclTracking::startTracking() {
 void MclTracking::stopTracking() {
     mRunning = false;
     if (mTask != nullptr) {
-        pros::delay(20);          // let the while(mRunning) loop exit cleanly
-        mTask->remove();
+        // Wait for the task to exit on its own (it self-deletes when run()
+        // returns). Hard-killing with remove() while the task holds the
+        // odometry mutex (inside getPose/setPose) would deadlock every other
+        // odometry consumer permanently — only remove() as a last resort.
+        uint32_t start = pros::millis();
+        while (pros::millis() - start < 200) {
+            uint32_t state = mTask->get_state();
+            if (state == pros::E_TASK_STATE_DELETED ||
+                state == pros::E_TASK_STATE_INVALID) break;
+            pros::delay(5);
+        }
+        uint32_t state = mTask->get_state();
+        if (state != pros::E_TASK_STATE_DELETED &&
+            state != pros::E_TASK_STATE_INVALID) {
+            mTask->remove();
+        }
         delete mTask;
         mTask = nullptr;
     }
@@ -174,9 +188,9 @@ bool MclTracking::isTracking() const {
 void MclTracking::run() {
     while (mRunning) {
         uint32_t startTime = pros::millis();
-        // Keep odometry fresh — without this, odom would be stale when
-        // the MCL task runs without a concurrent motion command.
-        mOdom.update();
+        // Odometry freshness is provided by the Chassis background odometry
+        // task (the sole caller of mOdom.update()). Calling update() here too
+        // would race on odometry state and consume delta baselines.
         update();
 
         // Maintain consistent update rate
@@ -196,6 +210,11 @@ void MclTracking::run() {
 
 void MclTracking::setPose(const Pose& pose) {
     mLastImuHeading = mOdom.imuHeadingRad();
+
+    // Discard motion accumulated before this reposition — it predates the
+    // new particle distribution and would otherwise be applied to freshly
+    // initialized particles on the next predict().
+    mOdom.consumeDelta();
 
     std::normal_distribution<float> xDist(pose.x, mConfig.distResampleVariance);
     std::normal_distribution<float> yDist(pose.y, mConfig.distResampleVariance);
@@ -256,7 +275,12 @@ void MclTracking::predict() {
     // trigonometrically decomposed from a fused global (X,Y) pose.
     // ========================================================================
 
-    OdomDelta delta = mOdom.getLastDelta();
+    // consumeDelta() returns motion ACCUMULATED since our previous predict()
+    // and resets the accumulator (thread-safe). getLastDelta() must not be
+    // used here: it holds only the most recent 10ms odometry tick, so any
+    // ticks that ran between MCL iterations (odometry updates at 10ms, MCL
+    // at 25ms) would be silently lost and particles would fall behind.
+    OdomDelta delta = mOdom.consumeDelta();
 
     float currentImuHeadingRad = mOdom.imuHeadingRad();
     float dThetaRad = delta.dTheta;

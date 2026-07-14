@@ -49,8 +49,18 @@ public:
     // Brake modes
     void setBrakeMode(pros::motor_brake_mode_e mode);
 
-    // Get average motor positions (degrees)
+    // Get average motor positions (degrees).
+    // Ignores PROS_ERR readings from disconnected motors.
     float averagePositionDeg() const;
+
+    // Wheel revolutions per motor revolution (wheel RPM / cartridge RPM).
+    // e.g. blue cartridge (600) geared to a 450 RPM drive → 0.75.
+    // Derived from get_gearing() and cached after the first valid read;
+    // returns 1.0 while the gearset is unknown (motor not yet responding).
+    float externalGearRatio() const;
+
+private:
+    mutable float mExtGearRatio{0.0f};   // 0 = not yet resolved
 };
 
 // ============================================================================
@@ -277,8 +287,20 @@ private:
     void runMotionTask();
     void executeCurrentMotion();
     void ensureMotionTask();
+
+    /// Background odometry task body — the SOLE caller of mOdom.update().
+    /// Runs at 100 Hz for the lifetime of the Chassis so the pose is always
+    /// fresh (during driver control, autonomous, and between motions alike).
+    void runOdomTask();
+
+    /// Wait for a self-exiting task to finish, then delete it. Falls back to
+    /// remove() after timeoutMs. Never hard-kills a task that might still be
+    /// inside a critical section unless the timeout expires.
+    static void joinTask(pros::Task*& task, uint32_t timeoutMs);
+
     enum class MotionType { None, Distance, Point, Heading, TurnPoint, Arc, Boomerang, RAMSETE, Swing };
     struct MotionRequest {
+        uint32_t seq{0};                 // sequence id for blocking-completion wait
         MotionType type{MotionType::None};
         float targetX{0}, targetY{0}, targetHeadingRad{0}, targetRadius{0};
         float targetDistance{0};         // raw distance for Distance motion (computed at exec time)
@@ -295,6 +317,12 @@ private:
         SwingSide swingSide{SwingSide::Left};
         std::vector<Pose> ramsetePath;
     };
+
+    /// Enqueue a motion for the single motion task to execute. When async is
+    /// false, blocks the caller until THIS motion completes (or is cancelled).
+    /// All motions — blocking and async — run on the one motion task, so the
+    /// motors, PIDs, and mCurrentMotion are only ever touched by one thread.
+    void enqueueMotion(MotionRequest& req, bool async);
 
     // ========================================================================
     // Members
@@ -316,10 +344,16 @@ private:
     std::atomic<bool> mMotionRunning{false};
     std::atomic<bool> mMotionCancelled{false};
     std::atomic<bool> mTaskShouldStop{false};
-    MotionRequest mCurrentMotion;
+    std::atomic<uint32_t> mMotionSeqCounter{0};  // last seq assigned at enqueue
+    std::atomic<uint32_t> mCompletedSeq{0};      // last seq the task finished
+    MotionRequest mCurrentMotion;                // only touched by the motion task
     std::queue<MotionRequest> mMotionQueue;
     pros::Mutex mQueueMutex;
     pros::Task* mMotionTask{nullptr};
+
+    // Background odometry task — sole caller of mOdom.update()
+    std::atomic<bool> mOdomTaskShouldStop{false};
+    pros::Task* mOdomTask{nullptr};
 
     // Drive curves
     DriveCurve mThrottleCurve;

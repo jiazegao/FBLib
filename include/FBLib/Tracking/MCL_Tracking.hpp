@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <random>
 #include <utility>
 #include <vector>
@@ -346,9 +347,11 @@ private:
     float mLastImuHeading{0.0f};
     float mLatestSpeed{0.0f};
 
-    // Background task
+    // Background task.
+    // mRunning is atomic: it's written by stopTracking() (caller task) and
+    // read by the loop in run() (worker task) — a cross-task flag.
     pros::Task* mTask{nullptr};
-    bool mRunning{false};
+    std::atomic<bool> mRunning{false};
 };
 
 }  // namespace FBLIB

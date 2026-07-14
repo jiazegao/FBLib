@@ -1,6 +1,7 @@
 #include "FBLib/Tracking/Odom_Tracking.hpp"
 
 #include <cmath>
+#include <mutex>
 
 #include "FBLib/Chassis.hpp"
 #include "pros/rtos.hpp"
@@ -41,16 +42,25 @@ float TrackingWheel::distanceIn() const {
     // Circumference of the tracking wheel
     float circumference = mWheelDiamIn * PI;
 
+    // PROS reports INT32_MAX (PROS_ERR) when the sensor errors or is
+    // unplugged. Integrating that would teleport odometry ~150,000 miles;
+    // hold the last good distance instead.
+    constexpr int32_t kProsErr = INT32_MAX;
+
     if (mType == SensorType::ADI && mAdi != nullptr) {
         // ADI encoder: ticks → revolutions → distance
-        float ticks = static_cast<float>(mAdi->get_value());
-        float revolutions = ticks / (ADI_TICKS_PER_REV * mGearRatio);
-        return revolutions * circumference;
+        int32_t rawTicks = mAdi->get_value();
+        if (rawTicks == kProsErr) return mLastGoodDistIn;
+        float revolutions = static_cast<float>(rawTicks) / (ADI_TICKS_PER_REV * mGearRatio);
+        mLastGoodDistIn = revolutions * circumference;
+        return mLastGoodDistIn;
     } else if (mType == SensorType::Rotation && mRot != nullptr) {
         // Rotation sensor: centidegrees → revolutions → distance
-        float centidegrees = static_cast<float>(mRot->get_position());
-        float revolutions = centidegrees / (ROTATION_UNITS_PER_REV * mGearRatio);
-        return revolutions * circumference;
+        int32_t rawCentideg = mRot->get_position();
+        if (rawCentideg == kProsErr) return mLastGoodDistIn;
+        float revolutions = static_cast<float>(rawCentideg) / (ROTATION_UNITS_PER_REV * mGearRatio);
+        mLastGoodDistIn = revolutions * circumference;
+        return mLastGoodDistIn;
     }
     return 0.0f;
 }
@@ -93,6 +103,7 @@ OdomTracking::OdomTracking(const OdomSensors& sensors)
 }
 
 void OdomTracking::setSensors(const OdomSensors& sensors) {
+    std::lock_guard<pros::Mutex> lock(mMutex);
     mSensors = sensors;
     mPrevVertDist  = currentVertDistance();
     mPrevHorizDist = currentHorizDistance();
@@ -111,8 +122,14 @@ float OdomTracking::currentVertDistance() const {
     // 2. Integrated motor encoders (drivetrain fallback)
     if (mSensors.drivetrain != nullptr) {
         float avgDeg = mSensors.drivetrain->averagePositionDeg();
-        float revolutions = avgDeg / 360.0f;
-        return revolutions * mSensors.drivetrain->wheelDiameter * PI;
+        float motorRevolutions = avgDeg / 360.0f;
+        // Motor encoders measure the MOTOR shaft. With an external gear ratio
+        // (e.g. 600 RPM blue cartridge driving a 450 RPM wheel), one motor rev
+        // is only wheelRPM/cartridgeRPM wheel revs. Omitting this factor
+        // overestimated distance by 33% on a 600→450 geared drive.
+        float wheelRevolutions = motorRevolutions *
+            mSensors.drivetrain->externalGearRatio();
+        return wheelRevolutions * mSensors.drivetrain->wheelDiameter * PI;
     }
     // 3. No vertical tracking source
     return 0.0f;
@@ -130,6 +147,10 @@ float OdomTracking::currentHorizDistance() const {
 float OdomTracking::currentHeadingRad() const {
     if (!mSensors.imuCollection.empty() && mSensors.imuCollection[0] != nullptr) {
         float rawHeading = mSensors.imuCollection[0]->get_heading();
+        // PROS returns PROS_ERR_F (== INFINITY) on an IMU fault (disconnect,
+        // transient error, mid-calibration). Feeding that downstream corrupts
+        // the pose; hold the last good heading instead of integrating garbage.
+        if (!std::isfinite(rawHeading)) return mPrevHeadingRad;
         // Apply calibration scale factor to correct IMU under-reporting.
         // V5 IMUs typically read ~354.25° for a 360° physical turn.
         float scaledHeading = rawHeading * mSensors.imuScaleFactor;
@@ -143,6 +164,7 @@ float OdomTracking::currentHeadingRad() const {
 // ============================================================================
 
 void OdomTracking::update() {
+    std::lock_guard<pros::Mutex> lock(mMutex);
     float headingRad = currentHeadingRad();
     float vertDist   = currentVertDistance();
     float horizDist  = currentHorizDistance();
@@ -182,9 +204,23 @@ void OdomTracking::update() {
 
     // — Expose decomposed delta for MCL per-axis noise —
     mLastDelta = {dVert, dHoriz, dThetaRad};
+
+    // — Accumulate for consumeDelta() so consumers polling slower than the
+    //   update rate (e.g. MCL at 25ms vs odometry at 10ms) never miss motion —
+    mAccumDelta.dVert  += dVert;
+    mAccumDelta.dHoriz += dHoriz;
+    mAccumDelta.dTheta += dThetaRad;
+}
+
+OdomDelta OdomTracking::consumeDelta() {
+    std::lock_guard<pros::Mutex> lock(mMutex);
+    OdomDelta out = mAccumDelta;
+    mAccumDelta = {};
+    return out;
 }
 
 void OdomTracking::setPose(const Pose& pose) {
+    std::lock_guard<pros::Mutex> lock(mMutex);
     mPose = pose;
     // Re-sync accumulated distances to current sensor readings so the next
     // delta starts from zero (tracking wheels → motor encoders → 0).
@@ -198,10 +234,12 @@ void OdomTracking::setPose(const Pose& pose) {
 }
 
 Pose OdomTracking::getPose() const {
+    std::lock_guard<pros::Mutex> lock(mMutex);
     return mPose;
 }
 
 void OdomTracking::reset() {
+    std::lock_guard<pros::Mutex> lock(mMutex);
     // Reset all tracking wheels (if present)
     for (auto* wheel : mSensors.vertWheelCollection) {
         if (wheel != nullptr) wheel->reset();
@@ -218,17 +256,22 @@ void OdomTracking::reset() {
     // delta.  Setting this to 0.0f would cause a ~90° spurious rotation
     // on the first update after reset (IMU 0° VEX = PI/2 rad).
     mPrevHeadingRad = currentHeadingRad();
+    // Drop any motion accumulated before the reset — it belongs to the old
+    // baseline and would otherwise be applied to consumers after re-zeroing.
+    mLastDelta = {};
+    mAccumDelta = {};
 }
 
 void OdomTracking::calibrate() {
-    // Calibrate all IMUs
+    // Calibrate all IMUs.
+    // Use blocking mode (true) so we don't need a blind delay — the call returns
+    // only after calibration completes (~2s).  Without blocking, reset(false)
+    // starts calibration but returns immediately, leading to premature reads.
     for (auto* imu : mSensors.imuCollection) {
         if (imu != nullptr) {
-            imu->reset();
+            imu->reset(true);
         }
     }
-    // Wait for IMU calibration to settle (PROS docs recommend ~2 seconds)
-    pros::delay(2000);
     reset();
 }
 

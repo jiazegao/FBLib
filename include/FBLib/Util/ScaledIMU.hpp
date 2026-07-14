@@ -24,11 +24,11 @@ namespace FBLIB {
 //   3. Read imu.get_rotation() / 10.0 to get the per-revolution reading.
 //   4. Pass that value as actual_reading.
 //
-// IMPORTANT: pros::Imu methods are NOT virtual.  If a ScaledIMU* is passed
-// through a pros::Imu* pointer (e.g. in OdomSensors::imuCollection), the
-// base-class methods will be called — NOT the scaled overrides.  To use
-// scaling through the odometry pipeline, set OdomSensors::imuScaleFactor
-// instead (or in addition to) using this class.
+// NOTE: pros::Imu::get_rotation() and get_heading() ARE virtual, so the
+// scaled overrides WILL be called through a pros::Imu* pointer.  Be careful
+// not to double-scale: if you use ScaledIMU, leave OdomSensors::imuScaleFactor
+// at its default 1.0.  If you use a plain pros::Imu, set imuScaleFactor
+// instead.  Never set both to non-1.0 values for the same IMU.
 // ============================================================================
 
 class ScaledIMU : public pros::Imu {
@@ -57,14 +57,16 @@ public:
 
     /// Return the scaled continuous rotation (degrees).
     /// Positive = clockwise (VEX convention).
-    double get_rotation() const {
+    /// `override` verified: pros::Imu::get_rotation() is virtual, so this is
+    /// called even through a pros::Imu* (e.g. OdomSensors::imuCollection).
+    double get_rotation() const override {
         double raw = pros::Imu::get_rotation();
         if (std::isinf(raw)) return raw;  // PROS error sentinel
         return raw * mScaleFactor;
     }
 
     /// Return the scaled bounded heading [0, 360) degrees.
-    double get_heading() const {
+    double get_heading() const override {
         double scaled = get_rotation();
         if (std::isinf(scaled)) return scaled;
 

@@ -66,7 +66,11 @@ struct Pose {
 // ============================================================================
 
 /// Wrap angle to [-PI, PI]
+/// NOTE: guards against non-finite input. A subtractive loop on +inf never
+/// terminates (inf - 2π == inf), which hard-freezes the brain. IMU errors
+/// surface as PROS_ERR_F (== INFINITY), so this guard is load-bearing.
 inline float wrapRad(float rad) {
+    if (!std::isfinite(rad)) return 0.0f;
     while (rad > PI) rad -= TWO_PI;
     while (rad < -PI) rad += TWO_PI;
     return rad;
@@ -74,6 +78,7 @@ inline float wrapRad(float rad) {
 
 /// Wrap angle to [0, TWO_PI)
 inline float wrapRadPositive(float rad) {
+    if (!std::isfinite(rad)) return 0.0f;
     while (rad >= TWO_PI) rad -= TWO_PI;
     while (rad < 0.0f) rad += TWO_PI;
     return rad;
@@ -81,6 +86,7 @@ inline float wrapRadPositive(float rad) {
 
 /// Wrap degrees to [0, 360)
 inline float wrapDeg(float deg) {
+    if (!std::isfinite(deg)) return 0.0f;
     while (deg >= 360.0f) deg -= 360.0f;
     while (deg < 0.0f) deg += 360.0f;
     return deg;
@@ -89,6 +95,7 @@ inline float wrapDeg(float deg) {
 /// Shortest signed angular difference from `from` to `to` (radians)
 inline float angleDiffRad(float from, float to) {
     float diff = to - from;
+    if (!std::isfinite(diff)) return 0.0f;
     while (diff > PI) diff -= TWO_PI;
     while (diff < -PI) diff += TWO_PI;
     return diff;

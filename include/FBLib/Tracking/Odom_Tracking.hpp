@@ -5,6 +5,7 @@
 #include "pros/adi.hpp"
 #include "pros/imu.hpp"
 #include "pros/rotation.hpp"
+#include "pros/rtos.hpp"
 
 #include "FBLib/Util/Util.hpp"
 
@@ -64,6 +65,12 @@ private:
     float mWheelDiamIn{0.0f};
     float mOffsetIn{0.0f};
     float mGearRatio{1.0f};
+
+    // Last valid distance — returned when the sensor reports PROS_ERR
+    // (INT32_MAX) so a transient disconnect holds position instead of
+    // teleporting odometry by ~2 billion ticks. Mutable: distanceIn() is
+    // logically const.
+    mutable float mLastGoodDistIn{0.0f};
 };
 
 // ============================================================================
@@ -101,12 +108,24 @@ public:
 
     // Run one odometry update. Call at a fixed frequency (e.g. 10ms / 100Hz).
     // Reads all sensors, computes delta, and integrates into the current pose.
+    // Thread-safe: internally serialized — but note that every update() call
+    // consumes the sensor-delta baseline, so consumers needing motion deltas
+    // must use consumeDelta() (accumulated), never getLastDelta(), when more
+    // than one task may be calling update().
     void update();
 
     // Retrieve the decomposed delta from the last update() call.
     // dVert and dHoriz are independent sensor measurements (not geometrically
     // decomposed from a fused X/Y pose), allowing per-axis noise in MCL.
+    // WARNING: single-tick only. If update() runs more than once between two
+    // reads, the intermediate deltas are LOST. Use consumeDelta() instead.
     OdomDelta getLastDelta() const { return mLastDelta; }
+
+    // Retrieve the ACCUMULATED decomposed delta since the previous call to
+    // consumeDelta(), and reset the accumulator. Thread-safe. This is what
+    // MCL uses to propagate particles — it never misses motion regardless of
+    // how many update() ticks ran between MCL iterations.
+    OdomDelta consumeDelta();
 
     // Whether horizontal tracking is available (dedicated wheel, not zero-fallback).
     bool hasHorizontalTracking() const {
@@ -143,6 +162,12 @@ private:
     OdomSensors mSensors;
     Pose mPose;
 
+    // Serializes update()/setPose()/getPose()/reset()/consumeDelta() across
+    // tasks. Multiple tasks touch odometry concurrently (motion task, MCL,
+    // RCL, user code) — unserialized read-modify-write of mPose/mPrev* would
+    // corrupt the pose. Mutable so const accessors (getPose) can lock.
+    mutable pros::Mutex mMutex;
+
     // Previous readings for delta computation
     float mPrevVertDist{0.0f};     // accumulated vertical distance last update
     float mPrevHorizDist{0.0f};    // accumulated horizontal distance last update
@@ -151,6 +176,10 @@ private:
     // Most recent decomposed delta, stored for MCL per-axis noise.
     // Updated at the end of each update() call.
     OdomDelta mLastDelta;
+
+    // Accumulated delta since last consumeDelta() — survives multiple
+    // update() ticks so consumers never miss motion.
+    OdomDelta mAccumDelta;
 
     // Helper: average distance across a wheel collection
     static float averageDistance(const std::vector<TrackingWheel*>& wheels);

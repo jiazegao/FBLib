@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <vector>
 
 #include "pros/distance.hpp"
@@ -215,8 +216,10 @@ private:
     // Timed disable support
     std::array<float, MAX_DISTANCE_SENSORS> mDisableTimers{};
 
+    // mRunning is atomic: written by stopTracking() (caller task), read by
+    // the loop in run() (worker task) — a cross-task flag.
     pros::Task* mTask{nullptr};
-    bool mRunning{false};
+    std::atomic<bool> mRunning{false};
 };
 
 }  // namespace FBLIB

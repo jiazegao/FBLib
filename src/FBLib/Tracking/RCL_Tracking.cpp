@@ -465,8 +465,22 @@ void RclTracking::startTracking() {
 void RclTracking::stopTracking() {
     mRunning = false;
     if (mTask != nullptr) {
-        pros::delay(20);          // let the while(mRunning) loop exit cleanly
-        mTask->remove();
+        // Wait for the task to exit on its own (it self-deletes when run()
+        // returns). Hard-killing with remove() while the task holds the
+        // odometry mutex (inside getPose/setPose) would deadlock every other
+        // odometry consumer permanently — only remove() as a last resort.
+        uint32_t start = pros::millis();
+        while (pros::millis() - start < 200) {
+            uint32_t state = mTask->get_state();
+            if (state == pros::E_TASK_STATE_DELETED ||
+                state == pros::E_TASK_STATE_INVALID) break;
+            pros::delay(5);
+        }
+        uint32_t state = mTask->get_state();
+        if (state != pros::E_TASK_STATE_DELETED &&
+            state != pros::E_TASK_STATE_INVALID) {
+            mTask->remove();
+        }
         delete mTask;
         mTask = nullptr;
     }
@@ -479,9 +493,9 @@ bool RclTracking::isTracking() const {
 void RclTracking::run() {
     while (mRunning) {
         uint32_t startTime = pros::millis();
-        // Keep odometry fresh — without this, odom would be stale when
-        // the RCL task runs without a concurrent motion command.
-        mOdom.update();
+        // Odometry freshness is provided by the Chassis background odometry
+        // task (the sole caller of mOdom.update()). Calling update() here too
+        // would race on odometry state and consume delta baselines.
         update();
         int32_t elapsed = pros::millis() - startTime;
         int32_t remaining = static_cast<int32_t>(mConfig.updatePeriodMs) - elapsed;
