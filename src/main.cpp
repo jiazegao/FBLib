@@ -194,18 +194,20 @@ void opcontrol() {
 
     // Driver control loop
     while (true) {
-        // Read joystick values (always read — arcade() yields to async motions internally)
-        int leftY  = master.get_analog(pros::E_CONTROLLER_ANALOG_LEFT_Y);
-        int rightX = master.get_analog(pros::E_CONTROLLER_ANALOG_RIGHT_X);
+        // Read joystick values
+        if (chassis.isSettled()) {
+            int leftY  = master.get_analog(pros::E_CONTROLLER_ANALOG_LEFT_Y);
+            int rightX = master.get_analog(pros::E_CONTROLLER_ANALOG_RIGHT_X);
 
-        // — Choose one drive style —
+            // — Choose one drive style —
 
-        // Option A: Tank drive (left stick = left wheels, right stick = right wheels)
-        // int rightY = master.get_analog(pros::E_CONTROLLER_ANALOG_RIGHT_Y);
-        // chassis.tank(leftY, rightY);
+            // Option A: Tank drive (left stick = left wheels, right stick = right wheels)
+            // int rightY = master.get_analog(pros::E_CONTROLLER_ANALOG_RIGHT_Y);
+            // chassis.tank(leftY, rightY);
 
-        // Option B: Arcade drive (left stick = throttle, right stick = steer)
-        chassis.arcade(leftY, rightX);
+            // Option B: Arcade drive (left stick = throttle, right stick = steer)
+            chassis.arcade(leftY, rightX);
+        }
 
         // Option C: Curvature drive (smoother turning while driving)
         // chassis.curvature(leftY, rightX);
