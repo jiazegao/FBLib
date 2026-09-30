@@ -19,7 +19,9 @@ namespace FBLIB {
 //   2. Dynamic (dry-run): robot's recorded trajectory drawn in real-time,
 //      producing a 1:1 map of actual movement
 //
-// Field: 144" x 144", center (0,0) → Screen: 480x240, origin top-left
+// Field: 144" x 144", center (0,0) → a square area as tall as the shorter
+// screen side, centered (240x240 on the 480x240 brain screen), origin top-left.
+// The preview sits behind other widgets on the screen and takes no input.
 // ============================================================================
 
 class PathPreview {

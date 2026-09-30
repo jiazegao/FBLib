@@ -94,20 +94,19 @@ void TrackingWheel::reset() {
 OdomTracking::OdomTracking(const OdomSensors& sensors)
     : mSensors(sensors), mPose() {
     // Initialize previous readings from current sensor values so the first
-    // update() computes a near-zero delta.  Without this, the first update
-    // sees a jump equal to the entire accumulated tracking-wheel distance
-    // plus a 90° heading offset (IMU 0° VEX = PI/2 standard radians).
-    mPrevVertDist   = currentVertDistance();
-    mPrevHorizDist  = currentHorizDistance();
-    mPrevHeadingRad = currentHeadingRad();
+    // update() computes a near-zero delta, and start facing the IMU heading.
+    mPrevVertDist    = currentVertDistance();
+    mPrevHorizDist   = currentHorizDistance();
+    mPrevRotationDeg = currentRotationDeg();
+    mPose.theta      = vexToStdRad(mPrevRotationDeg);
 }
 
 void OdomTracking::setSensors(const OdomSensors& sensors) {
     std::lock_guard<pros::Mutex> lock(mMutex);
     mSensors = sensors;
-    mPrevVertDist  = currentVertDistance();
-    mPrevHorizDist = currentHorizDistance();
-    mPrevHeadingRad = currentHeadingRad();
+    mPrevVertDist    = currentVertDistance();
+    mPrevHorizDist   = currentHorizDistance();
+    mPrevRotationDeg = currentRotationDeg();
 }
 
 // ============================================================================
@@ -144,19 +143,30 @@ float OdomTracking::currentHorizDistance() const {
     return 0.0f;
 }
 
-float OdomTracking::currentHeadingRad() const {
+float OdomTracking::currentRotationDeg() const {
     if (!mSensors.imuCollection.empty() && mSensors.imuCollection[0] != nullptr) {
-        float rawHeading = mSensors.imuCollection[0]->get_heading();
+        // Continuous rotation, NOT the wrapped 0-360 heading: scaling a
+        // wrapped value makes it jump by 360*(scale-1) degrees every time the
+        // robot crosses north.
+        double rotation = mSensors.imuCollection[0]->get_rotation();
         // PROS returns PROS_ERR_F (== INFINITY) on an IMU fault (disconnect,
-        // transient error, mid-calibration). Feeding that downstream corrupts
-        // the pose; hold the last good heading instead of integrating garbage.
-        if (!std::isfinite(rawHeading)) return mPrevHeadingRad;
+        // transient error, mid-calibration). Hold the last good reading
+        // instead of integrating garbage.
+        if (!std::isfinite(rotation)) return mPrevRotationDeg;
         // Apply calibration scale factor to correct IMU under-reporting.
         // V5 IMUs typically read ~354.25° for a 360° physical turn.
-        float scaledHeading = rawHeading * mSensors.imuScaleFactor;
-        return vexToStdRad(scaledHeading);
+        return static_cast<float>(rotation) * mSensors.imuScaleFactor;
     }
     return 0.0f;
+}
+
+float OdomTracking::vertOffset() const {
+    // Motor encoders average both sides, which cancels rotation already.
+    return mSensors.vertWheelCollection.empty() ? 0.0f : averageOffset(mSensors.vertWheelCollection);
+}
+
+float OdomTracking::horizOffset() const {
+    return averageOffset(mSensors.horizWheelCollection);
 }
 
 // ============================================================================
@@ -165,42 +175,41 @@ float OdomTracking::currentHeadingRad() const {
 
 void OdomTracking::update() {
     std::lock_guard<pros::Mutex> lock(mMutex);
-    float headingRad = currentHeadingRad();
-    float vertDist   = currentVertDistance();
-    float horizDist  = currentHorizDistance();
+    float rotationDeg = currentRotationDeg();
+    float vertDist    = currentVertDistance();
+    float horizDist   = currentHorizDistance();
 
     // — Compute deltas since last update —
-    float dThetaRad = headingRad - mPrevHeadingRad;
-    dThetaRad = wrapRad(dThetaRad);
+    // VEX rotation is clockwise-positive; pose heading is counter-clockwise.
+    float dThetaRad = wrapRad(-degToRad(rotationDeg - mPrevRotationDeg));
 
-    float dVert  = vertDist  - mPrevVertDist;
-    float dHoriz = horizDist - mPrevHorizDist;
+    // A wheel mounted away from the tracking center also rolls when the
+    // robot only rotates: a vertical wheel `o` inches right of center moves
+    // forward o*dTheta in a CCW turn; a horizontal wheel `o` inches ahead of
+    // center moves left o*dTheta. Remove that so only the CENTER's motion is
+    // integrated (otherwise every turn adds phantom translation).
+    float dVert  = (vertDist  - mPrevVertDist)  - vertOffset()  * dThetaRad;
+    float dHoriz = (horizDist - mPrevHorizDist) - horizOffset() * dThetaRad;
 
-    // — Arc approximation for field-frame displacement —
-    float midHeadingRad = mPrevHeadingRad + dThetaRad * 0.5f;
+    // — Arc integration in the FIELD frame —
+    // Motion along an arc of angle dTheta covers a chord 2*sin(dTheta/2)/dTheta
+    // of its length, in the direction of the average (mid-tick) heading.
+    float chordScale = (std::fabs(dThetaRad) < 1e-6f)
+        ? 1.0f
+        : 2.0f * std::sin(0.5f * dThetaRad) / dThetaRad;
+    float midHeadingRad = mPose.theta + 0.5f * dThetaRad;
+    float cosMid = std::cos(midHeadingRad);
+    float sinMid = std::sin(midHeadingRad);
 
-    float dX = 0.0f;
-    float dY = 0.0f;
-
-    if (std::fabs(dThetaRad) < 1e-6f) {
-        // Negligible rotation → use simple trig (no arc)
-        dX = dVert * std::cos(mPrevHeadingRad) - dHoriz * std::sin(mPrevHeadingRad);
-        dY = dVert * std::sin(mPrevHeadingRad) + dHoriz * std::cos(mPrevHeadingRad);
-    } else {
-        // Arc approximation with midpoint heading
-        dX = dVert * std::cos(midHeadingRad) - dHoriz * std::sin(midHeadingRad);
-        dY = dVert * std::sin(midHeadingRad) + dHoriz * std::cos(midHeadingRad);
-    }
-
-    // — Integrate into pose —
-    mPose.x += dX;
-    mPose.y += dY;
-    mPose.theta = headingRad;
+    // Robot frame: vertical = forward, horizontal = left
+    mPose.x += chordScale * (dVert * cosMid - dHoriz * sinMid);
+    mPose.y += chordScale * (dVert * sinMid + dHoriz * cosMid);
+    mPose.theta = wrapRad(mPose.theta + dThetaRad);
 
     // — Store for next update —
-    mPrevVertDist   = vertDist;
-    mPrevHorizDist  = horizDist;
-    mPrevHeadingRad = headingRad;
+    mPrevVertDist    = vertDist;
+    mPrevHorizDist   = horizDist;
+    mPrevRotationDeg = rotationDeg;
 
     // — Expose decomposed delta for MCL per-axis noise —
     mLastDelta = {dVert, dHoriz, dThetaRad};
@@ -212,6 +221,11 @@ void OdomTracking::update() {
     mAccumDelta.dTheta += dThetaRad;
 }
 
+OdomDelta OdomTracking::getLastDelta() const {
+    std::lock_guard<pros::Mutex> lock(mMutex);
+    return mLastDelta;
+}
+
 OdomDelta OdomTracking::consumeDelta() {
     std::lock_guard<pros::Mutex> lock(mMutex);
     OdomDelta out = mAccumDelta;
@@ -219,18 +233,30 @@ OdomDelta OdomTracking::consumeDelta() {
     return out;
 }
 
+// Pose setters do NOT re-baseline the sensors: the next update() applies the
+// motion since the previous tick on top of the new pose. Re-baselining here
+// silently dropped that motion — and MCL/RCL sync many times a second.
+
 void OdomTracking::setPose(const Pose& pose) {
     std::lock_guard<pros::Mutex> lock(mMutex);
-    mPose = pose;
-    // Re-sync accumulated distances to current sensor readings so the next
-    // delta starts from zero (tracking wheels → motor encoders → 0).
-    mPrevVertDist  = currentVertDistance();
-    mPrevHorizDist = currentHorizDistance();
-    // IMPORTANT: do NOT set mPrevHeadingRad here.  mPrevHeadingRad tracks
-    // the raw IMU heading, not the odometry pose heading.  Overwriting it
-    // with pose.theta would cause the next update() to compute a spurious
-    // dThetaRad equal to imuHeading - pose.theta (the sync correction of any
-    // tracking system that called setPose, e.g. MCL syncToOdometry).
+    mPose = {pose.x, pose.y, wrapRad(pose.theta)};
+}
+
+void OdomTracking::setPosition(float x, float y) {
+    std::lock_guard<pros::Mutex> lock(mMutex);
+    mPose.x = x;
+    mPose.y = y;
+}
+
+void OdomTracking::setHeading(float thetaRad) {
+    std::lock_guard<pros::Mutex> lock(mMutex);
+    mPose.theta = wrapRad(thetaRad);
+}
+
+void OdomTracking::translate(float dx, float dy) {
+    std::lock_guard<pros::Mutex> lock(mMutex);
+    mPose.x += dx;
+    mPose.y += dy;
 }
 
 Pose OdomTracking::getPose() const {
@@ -247,15 +273,15 @@ void OdomTracking::reset() {
     for (auto* wheel : mSensors.horizWheelCollection) {
         if (wheel != nullptr) wheel->reset();
     }
-    mPose = Pose{};
     // Re-baseline: for motor encoders (which can't be reset), store the
     // current reading so the next delta starts from zero.
-    mPrevVertDist   = currentVertDistance();
-    mPrevHorizDist  = currentHorizDistance();
-    // Read current IMU heading so the next update() computes a near-zero
-    // delta.  Setting this to 0.0f would cause a ~90° spurious rotation
-    // on the first update after reset (IMU 0° VEX = PI/2 rad).
-    mPrevHeadingRad = currentHeadingRad();
+    mPrevVertDist    = currentVertDistance();
+    mPrevHorizDist   = currentHorizDistance();
+    mPrevRotationDeg = currentRotationDeg();
+    // Zero the position and face the way the IMU says (IMU 0° = +Y). Set it
+    // here rather than waiting for the next update() so a motion started
+    // straight after calibrate() doesn't see a stale heading.
+    mPose = {0.0f, 0.0f, vexToStdRad(mPrevRotationDeg)};
     // Drop any motion accumulated before the reset — it belongs to the old
     // baseline and would otherwise be applied to consumers after re-zeroing.
     mLastDelta = {};
@@ -276,11 +302,8 @@ void OdomTracking::calibrate() {
 }
 
 float OdomTracking::imuHeadingDeg() const {
-    if (!mSensors.imuCollection.empty() && mSensors.imuCollection[0] != nullptr) {
-        float rawHeading = mSensors.imuCollection[0]->get_heading();
-        return rawHeading * mSensors.imuScaleFactor;
-    }
-    return 0.0f;
+    std::lock_guard<pros::Mutex> lock(mMutex);
+    return wrapDeg(currentRotationDeg());
 }
 
 float OdomTracking::imuHeadingRad() const {

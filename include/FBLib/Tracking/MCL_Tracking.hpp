@@ -63,8 +63,8 @@ public:
         float horizDependentVarianceProp = 0.03f;  // multiplied by |dVert|
         float horizConstantNoise = 0.03f;          // inches/update baseline
 
-        float distSyncProp = 0.10f;        // lerp factor for syncing to chassis
-        float thetaSyncProp = 0.001f;
+        float distSyncProp = 0.10f;        // lerp factor for syncing position to chassis
+        float thetaSyncProp = 0.001f;      // unused: heading is never synced (IMU is authoritative)
         float updatePeriodMs = 25.0f;      // background task interval
         int confidenceThreshold = 10;      // min sensor confidence
         float minSensorRange = 1.0f;       // mm — readings below this are invalid
@@ -123,9 +123,9 @@ public:
     // ========================================================================
 
     /// Motion update — propagate particles using decomposed odometry delta.
-    /// Reads the per-axis (vertical, horizontal, angular) delta directly from
-    /// OdomTracking::getLastDelta().  dVert and dHoriz are independent sensor
-    /// measurements, allowing statistically correct per-axis noise.
+    /// Reads the per-axis (vertical, horizontal, angular) delta accumulated
+    /// by OdomTracking::consumeDelta().  dVert and dHoriz are independent
+    /// sensor measurements, allowing statistically correct per-axis noise.
     void predict();
 
     /// Sensor update — weight particles by how well they match sensor readings
@@ -152,7 +152,8 @@ public:
     /// Returns the new estimated pose
     Pose update();
 
-    /// Smoothly interpolate MCL estimate into odometry pose
+    /// Smoothly pull the odometry POSITION toward the MCL estimate. Heading is
+    /// left alone — the IMU is authoritative for orientation.
     void syncToOdometry();
 
     // ========================================================================
@@ -238,7 +239,7 @@ private:
     /// Ray-cast against these (in priority order before walls) when weighting
     /// particles.  Add goal legs, barriers, etc. for the current season.
     static constexpr LineObstacle kFieldTargets[] = {
-        // Example — middle goal diagonal legs (2025-26 "High Stakes"):
+        // Example — center goal diagonal legs (2025-26 "Push Back"):
         // {{-5.0f,  5.0f}, { 5.0f, -5.0f}},
         // {{-5.0f, -5.0f}, { 5.0f,  5.0f}},
         // TODO: add season-specific line targets here
@@ -286,6 +287,18 @@ private:
 
     float nextNoise();
     void regenerateNoise();
+
+    // ========================================================================
+    // Unlocked implementations (caller holds mMutex)
+    // ========================================================================
+
+    void initParticlesAround(const Pose& pose);
+    void scatterParticles();
+    void predictUnlocked();
+    void updateWeightsUnlocked();
+    void resampleUnlocked();
+    std::pair<Pose, float> estimateUnlocked() const;
+    void syncUnlocked();
 
     // ========================================================================
     // Background task
@@ -344,8 +357,12 @@ private:
     // State
     Pose mLastResamplePose{};
     Pose mRawEstimate{};
-    float mLastImuHeading{0.0f};
     float mLatestSpeed{0.0f};
+
+    // Guards particles, sensor configuration and estimate state: the MCL task
+    // and user tasks (setPose, sensor/obstacle changes) touch them
+    // concurrently. Lock order: this mutex, then OdomTracking's.
+    mutable pros::Mutex mMutex;
 
     // Background task.
     // mRunning is atomic: it's written by stopTracking() (caller task) and

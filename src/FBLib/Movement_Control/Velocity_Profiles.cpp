@@ -2,14 +2,38 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 
 #include "FBLib/Util/Util.hpp"
 
 namespace FBLIB {
 
+namespace {
+
+/// Upper bound on samples per profile so degenerate inputs (e.g. a tiny
+/// maxVel) cannot allocate unbounded memory on the brain.
+constexpr std::size_t MAX_PROFILE_SAMPLES = 20000;
+
+/// Number of dt steps covering [0, tTotal], widening dt if it would exceed
+/// MAX_PROFILE_SAMPLES.
+std::size_t sampleSteps(float tTotal, float& dt) {
+    float steps = std::ceil(tTotal / dt);
+    if (steps > static_cast<float>(MAX_PROFILE_SAMPLES)) {
+        dt = tTotal / static_cast<float>(MAX_PROFILE_SAMPLES);
+        steps = static_cast<float>(MAX_PROFILE_SAMPLES);
+    }
+    return static_cast<std::size_t>(std::max(steps, 1.0f));
+}
+
+}  // namespace
+
 std::vector<ProfilePoint> generateTrapezoidal(float distance, float maxVel,
                                                float maxAccel, float dt) {
     std::vector<ProfilePoint> profile;
+    if (!(distance > 0.0f) || !(maxVel > 0.0f) || !(maxAccel > 0.0f) || !(dt > 0.0f)) {
+        profile.push_back({0.0f, 0.0f, 0.0f});
+        return profile;
+    }
 
     // Time to accelerate to max velocity
     float tAccel = maxVel / maxAccel;
@@ -19,9 +43,12 @@ std::vector<ProfilePoint> generateTrapezoidal(float distance, float maxVel,
     // Check if we even reach max velocity (triangular profile)
     float tCruise, dCruise;
     if (2.0f * dAccel > distance) {
-        // Triangular: never reaches maxVel
+        // Triangular: never reaches maxVel. Half the distance accelerating,
+        // half decelerating (dAccel must be recomputed, or the deceleration
+        // phase starts from the full-speed ramp's distance).
         tAccel = std::sqrt(distance / maxAccel);
         maxVel = maxAccel * tAccel;
+        dAccel = 0.5f * distance;
         tCruise = 0.0f;
         dCruise = 0.0f;
     } else {
@@ -30,35 +57,33 @@ std::vector<ProfilePoint> generateTrapezoidal(float distance, float maxVel,
     }
 
     float tTotal = 2.0f * tAccel + tCruise;
-    float pos = 0.0f;
+    std::size_t steps = sampleSteps(tTotal, dt);
+    profile.reserve(steps + 1);
 
-    for (float t = 0.0f; t <= tTotal + dt; t += dt) {
-        float vel, accel;
+    for (std::size_t k = 0; k <= steps; k++) {
+        float t = static_cast<float>(k) * dt;
+        float vel, pos;
 
         if (t < tAccel) {
             // Accelerating
-            accel = maxAccel;
             vel = maxAccel * t;
             pos = 0.5f * maxAccel * t * t;
         } else if (t < tAccel + tCruise) {
             // Cruising
-            accel = 0.0f;
             vel = maxVel;
             pos = dAccel + maxVel * (t - tAccel);
         } else if (t < tTotal) {
             // Decelerating
             float tDecel = t - tAccel - tCruise;
-            accel = -maxAccel;
             vel = maxVel - maxAccel * tDecel;
             pos = dAccel + dCruise + maxVel * tDecel - 0.5f * maxAccel * tDecel * tDecel;
         } else {
             // Done
-            accel = 0.0f;
             vel = 0.0f;
             pos = distance;
         }
 
-        profile.push_back({t, vel, pos});
+        profile.push_back({t, vel, clamp(pos, 0.0f, distance)});
     }
 
     return profile;
@@ -67,189 +92,121 @@ std::vector<ProfilePoint> generateTrapezoidal(float distance, float maxVel,
 std::vector<ProfilePoint> generateSCurve(float distance, float maxVel,
                                           float maxAccel, float maxJerk,
                                           float dt) {
-    std::vector<ProfilePoint> profile;
-
-    // Guard: zero or negative distance
-    if (distance <= 0.0f) {
-        profile.push_back({0.0f, 0.0f, 0.0f});
-        return profile;
+    if (!(distance > 0.0f) || !(maxVel > 0.0f) || !(maxAccel > 0.0f) || !(dt > 0.0f)) {
+        return {{0.0f, 0.0f, 0.0f}};
+    }
+    if (!(maxJerk > 0.0f)) {
+        return generateTrapezoidal(distance, maxVel, maxAccel, dt);  // unlimited jerk
     }
 
     // ========================================================================
-    // Compute phase durations for a proper 7-phase S-curve:
-    //   1. Jerk up   (accel: 0 → +A)
-    //   2. Const accel
-    //   3. Jerk down (accel: +A → 0, speed peaks)
-    //   4. Cruise    (constant v)
-    //   5. Jerk down (accel: 0 → -A)
-    //   6. Const decel
-    //   7. Jerk up   (accel: -A → 0)
+    // 7-phase S-curve:
+    //   1. Jerk up   (accel: 0 → +a)       4. Cruise    (constant v)
+    //   2. Const accel                      5-7. Mirror of 1-3 (deceleration)
+    //   3. Jerk down (accel: +a → 0)
     //
-    // Phases 1,3,5,7 each have duration tJ = A / J.
-    // Phases 2,6 each have duration tA (may be zero).
-    // Phase 4 has duration tC (may be zero).
+    // Reaching speed v from rest:
+    //   v >= A²/J : accel saturates at A:  tJ = A/J, tA = v/A − A/J
+    //   v <  A²/J : accel peaks at a = √(vJ) < A:  tJ = √(v/J), tA = 0
+    // The velocity curve of the ramp is point-symmetric, so it covers
+    // v·(2·tJ + tA)/2. Moves too short for maxVel lower the peak speed
+    // (bisection — ramp distance grows monotonically with v).
     // ========================================================================
 
-    // Time to reach max accel from zero at max jerk
-    float tJ = maxAccel / maxJerk;
+    const float A = maxAccel;
+    const float J = maxJerk;
 
-    // Velocity gained in a single jerk-only ramp (no constant-accel phase):
-    //   v(t) = J·t²/2  at t = tJ → vJ = A² / (2·J)
-    float vJ = 0.5f * maxAccel * maxAccel / maxJerk;
-
-    // Distance covered in a single jerk-only ramp:
-    //   s(t) = J·t³/6  at t = tJ → sJ = A³ / (6·J²)
-    float sJ = maxAccel * maxAccel * maxAccel / (6.0f * maxJerk * maxJerk);
-
-    // Can we reach maxVel with full acceleration?
-    // Velocity after phases 1+2+3 = 2·vJ + A·tA  where tA = constant phase
-    float tA = (maxVel - 2.0f * vJ) / maxAccel;
-    bool fullAccel = (tA >= 0.0f);
-
-    float vPeak, aPeak;
-    if (fullAccel) {
-        vPeak = maxVel;
-        aPeak = maxAccel;
-    } else {
-        // Cannot reach maxVel — triangular acceleration (no constant-accel phase).
-        // Use the actual maxAccel; peak velocity is limited by accel + jerk alone.
-        tA = 0.0f;
-        aPeak = maxAccel;
-        vPeak = 2.0f * vJ;   // max speed reachable with jerk-only ramps
-    }
-
-    // — Distance during a full acceleration half (phases 1→3) —
-    // Phase 1: s1 = sJ,  v1 = vJ
-    // Phase 2: s2 = s1 + v1·tA + ½·A·tA²,  v2 = v1 + A·tA
-    // Phase 3: s3 = s2 + v2·tJ + ½·A·tJ² − J·tJ³/6 = s2 + v2·tJ + ½·A·tJ² − sJ
-    //   v3 = v2 + A·tJ − ½·J·tJ² = v2 + vJ
-
-    float a = aPeak;
-    float v1 = vJ;
-    float s1 = sJ;
-    float v2 = v1 + a * tA;
-    float s2 = s1 + v1 * tA + 0.5f * a * tA * tA;
-    float v3 = v2 + vJ;                               // = vPeak
-    float s3 = s2 + v2 * tJ + 0.5f * a * tJ * tJ - sJ;
-
-    float dAccel = s3;     // distance during acceleration half
-    float dDecel = dAccel; // symmetric deceleration
-    float dCruise = distance - dAccel - dDecel;
-
-    // — If distance is too short, reduce vPeak to fit —
-    if (dCruise < 0.0f) {
-        if (distance < 1.0f) {
-            return generateTrapezoidal(distance, maxVel, maxAccel, dt);
-        }
-
-        // Solve for vPeak that makes dCruise ≈ 0.
-        // The accel distance scales roughly as: dAccel ≈ (vPeak/A)² · A³/(3·J²)
-        // for jerk-only, or with a constant-accel term otherwise.
-        // Iterate to converge (usually 3-4 iterations).
-        float vTarget = vPeak;
-        for (int iter = 0; iter < 8; iter++) {
-            tA = std::max(0.0f, (vTarget - 2.0f * vJ) / a);
-            float vt1 = vJ;
-            float st1 = sJ;
-            float vt2 = vt1 + a * tA;
-            float st2 = st1 + vt1 * tA + 0.5f * a * tA * tA;
-            float st3 = st2 + vt2 * tJ + 0.5f * a * tJ * tJ - sJ;
-            float dTotal = 2.0f * st3;
-            if (dTotal <= distance + 0.001f) break;
-            vTarget -= (dTotal - distance) / (2.0f * tJ + tA + 0.01f); // approximate derivative
-            if (vTarget < 0.01f) vTarget = 0.01f;
-        }
-        vPeak = vTarget;
-        tA = std::max(0.0f, (vPeak - 2.0f * vJ) / a);
-        // Recompute with converged vPeak
-        v2 = vJ + a * tA;
-        s2 = sJ + vJ * tA + 0.5f * a * tA * tA;
-        v3 = v2 + vJ;
-        s3 = s2 + v2 * tJ + 0.5f * a * tJ * tJ - sJ;
-        dAccel = s3;
-        dCruise = 0.0f;
-    }
-
-    float tC = dCruise / vPeak;  // cruise duration
-
-    // — Phase time boundaries —
-    float T1 = tJ;
-    float T2 = T1 + tA;
-    float T3 = T2 + tJ;           // end of accel
-    float T4 = T3 + tC;           // end of cruise
-    float T5 = T4 + tJ;           // end of decel jerk-in
-    float T6 = T5 + tA;           // end of const decel
-    float T7 = T6 + tJ;           // end of decel
-
-    // ========================================================================
-    // Sample the profile at dt intervals
-    // ========================================================================
-
-    for (float t = 0.0f; t <= T7 + dt; t += dt) {
-        float pos_t, vel_t;
-
-        if (t <= 0.0f) {
-            vel_t = 0.0f; pos_t = 0.0f;
-        } else if (t < T1) {
-            // Phase 1: jerk up — a(τ) = +J·τ
-            float tau = t;
-            vel_t = 0.5f * maxJerk * tau * tau;
-            pos_t = maxJerk * tau * tau * tau / 6.0f;
-        } else if (t < T2) {
-            // Phase 2: constant +accel — a(τ) = +A
-            float tau = t - T1;
-            vel_t = v1 + a * tau;
-            pos_t = s1 + v1 * tau + 0.5f * a * tau * tau;
-        } else if (t < T3) {
-            // Phase 3: jerk down — a(τ) = +A − J·τ
-            float tau = t - T2;
-            vel_t = v2 + a * tau - 0.5f * maxJerk * tau * tau;
-            pos_t = s2 + v2 * tau + 0.5f * a * tau * tau
-                  - maxJerk * tau * tau * tau / 6.0f;
-        } else if (t < T4) {
-            // Phase 4: cruise — a = 0, v = vPeak
-            float tau = t - T3;
-            vel_t = vPeak;
-            pos_t = s3 + vPeak * tau;
-        } else if (t < T5) {
-            // Phase 5: jerk into decel — a(τ) = −J·τ
-            float tau = t - T4;
-            vel_t = vPeak - 0.5f * maxJerk * tau * tau;
-            pos_t = s3 + dCruise + vPeak * tau
-                  - maxJerk * tau * tau * tau / 6.0f;
-        } else if (t < T6) {
-            // Phase 6: constant −accel — a(τ) = −A
-            float tau = t - T5;
-            float v5 = vPeak - vJ;                                  // v at start of phase 6
-            float s5 = s3 + dCruise + vPeak * tJ - sJ;              // s at start of phase 6
-            vel_t = v5 - a * tau;
-            pos_t = s5 + v5 * tau - 0.5f * a * tau * tau;
-        } else if (t < T7) {
-            // Phase 7: jerk to zero — a(τ) = −A + J·τ
-            float tau = t - T6;
-            float v6 = vJ;                                           // v at start of phase 7
-            float s6 = distance - dAccel;                            // s at start of phase 7 (symmetric)
-            vel_t = v6 - a * tau + 0.5f * maxJerk * tau * tau;
-            pos_t = s6 + v6 * tau - 0.5f * a * tau * tau
-                  + maxJerk * tau * tau * tau / 6.0f;
+    struct Ramp {
+        float tJ, tA, a;  // jerk-phase time, constant-accel time, peak accel
+    };
+    auto rampFor = [A, J](float v) {
+        Ramp r;
+        if (v >= A * A / J) {
+            r.a = A;
+            r.tJ = A / J;
+            r.tA = v / A - A / J;
         } else {
-            vel_t = 0.0f;
-            pos_t = distance;
+            r.a = std::sqrt(v * J);
+            r.tJ = r.a / J;
+            r.tA = 0.0f;
         }
+        return r;
+    };
+    auto rampDistance = [&rampFor](float v) {
+        Ramp r = rampFor(v);
+        return 0.5f * v * (2.0f * r.tJ + r.tA);
+    };
 
-        pos_t = clamp(pos_t, 0.0f, distance);
-        profile.push_back({t, vel_t, pos_t});
-
-        if (pos_t >= distance - 0.001f && std::fabs(vel_t) < 0.01f) break;
+    float vPeak = maxVel;
+    if (2.0f * rampDistance(maxVel) > distance) {
+        float lo = 0.0f, hi = maxVel;
+        for (int i = 0; i < 60; i++) {
+            float mid = 0.5f * (lo + hi);
+            if (2.0f * rampDistance(mid) > distance) hi = mid;
+            else lo = mid;
+        }
+        vPeak = lo;
     }
 
-    // Ensure final point
-    if (profile.empty() || profile.back().position < distance - 0.01f) {
-        float tFinal = profile.empty() ? 0.0f : profile.back().time + dt;
-        profile.push_back({tFinal, 0.0f, distance});
-    }
+    const Ramp ramp = rampFor(vPeak);
+    const float tRamp = 2.0f * ramp.tJ + ramp.tA;
+    const float dRamp = 0.5f * vPeak * tRamp;
+    const float dCruise = std::max(distance - 2.0f * dRamp, 0.0f);
+    const float tCruise = (vPeak > 0.0f) ? dCruise / vPeak : 0.0f;
+    const float tTotal = 2.0f * tRamp + tCruise;
 
+    // Velocity/position during the acceleration ramp, t in [0, tRamp]
+    const float v1 = 0.5f * J * ramp.tJ * ramp.tJ;
+    const float s1 = J * ramp.tJ * ramp.tJ * ramp.tJ / 6.0f;
+    const float v2 = v1 + ramp.a * ramp.tA;
+    const float s2 = s1 + v1 * ramp.tA + 0.5f * ramp.a * ramp.tA * ramp.tA;
+    auto rampState = [&](float t, float& v, float& s) {
+        if (t < ramp.tJ) {                              // phase 1: a = J·t
+            v = 0.5f * J * t * t;
+            s = J * t * t * t / 6.0f;
+        } else if (t < ramp.tJ + ramp.tA) {             // phase 2: a = peak
+            float tau = t - ramp.tJ;
+            v = v1 + ramp.a * tau;
+            s = s1 + v1 * tau + 0.5f * ramp.a * tau * tau;
+        } else {                                        // phase 3: a = peak − J·τ
+            float tau = std::min(t - ramp.tJ - ramp.tA, ramp.tJ);
+            v = v2 + ramp.a * tau - 0.5f * J * tau * tau;
+            s = s2 + v2 * tau + 0.5f * ramp.a * tau * tau - J * tau * tau * tau / 6.0f;
+        }
+    };
+
+    std::vector<ProfilePoint> profile;
+    std::size_t steps = sampleSteps(tTotal, dt);
+    profile.reserve(steps + 1);
+    for (std::size_t k = 0; k <= steps; k++) {
+        float t = std::min(static_cast<float>(k) * dt, tTotal);
+        float v, s;
+        if (t <= tRamp) {
+            rampState(t, v, s);
+        } else if (t <= tRamp + tCruise) {
+            v = vPeak;
+            s = dRamp + vPeak * (t - tRamp);
+        } else {
+            // Deceleration mirrors the ramp in time
+            rampState(tTotal - t, v, s);
+            s = distance - s;
+        }
+        profile.push_back({t, std::max(v, 0.0f), clamp(s, 0.0f, distance)});
+    }
+    profile.back() = {tTotal, 0.0f, distance};
     return profile;
+}
+
+float trapezoidalVelocityAt(float position, float distance, float maxVel,
+                            float maxAccel, float edgeVel) {
+    if (!(maxVel > 0.0f)) return 0.0f;
+    if (!(maxAccel > 0.0f)) return maxVel;
+    float length = std::max(distance, 0.0f);
+    float s = clamp(position, 0.0f, length);
+    float v0 = clamp(edgeVel, 0.0f, maxVel);
+    float accelLimited = std::sqrt(v0 * v0 + 2.0f * maxAccel * s);
+    float decelLimited = std::sqrt(v0 * v0 + 2.0f * maxAccel * (length - s));
+    return std::min(maxVel, std::min(accelLimited, decelLimited));
 }
 
 }  // namespace FBLIB

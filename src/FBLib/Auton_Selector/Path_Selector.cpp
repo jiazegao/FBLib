@@ -1,5 +1,6 @@
 #include "FBLib/Auton_Selector/Path_Selector.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 
@@ -15,6 +16,15 @@ namespace FBLIB {
 // PathPreview — renders autonomous movement path on the V5 Brain screen
 // ============================================================================
 
+namespace {
+/// Pixels per inch. The field is square, so both axes share one scale set by
+/// the shorter screen side (separate X/Y scales stretched a 480x240 preview
+/// 2:1 and skewed every heading drawn on it).
+float fieldScale(int screenWidth, int screenHeight) {
+    return static_cast<float>(std::min(screenWidth, screenHeight)) / Field::FIELD_LENGTH;
+}
+}  // namespace
+
 PathPreview::PathPreview()
     : mCanvas(nullptr), mFieldImage(nullptr),
       mScreenWidth(480), mScreenHeight(240),
@@ -25,19 +35,26 @@ void PathPreview::init(const void* fieldImage, int screenWidth, int screenHeight
     mScreenWidth = screenWidth;
     mScreenHeight = screenHeight;
 
-    // Create a container for the field area
+    // Create a container for the field area. It goes BEHIND everything else
+    // on the screen and never takes input, so the AutonSelector's buttons
+    // stay visible and clickable when both share the screen.
     lv_obj_t* container = lv_obj_create(lv_screen_active());
     lv_obj_set_size(container, mScreenWidth, mScreenHeight);
     lv_obj_set_pos(container, 0, 0);
     lv_obj_set_style_bg_color(container, lv_color_hex(0x0A0A0A), 0);
     lv_obj_set_style_border_width(container, 0, 0);
     lv_obj_set_style_pad_all(container, 0, 0);
+    lv_obj_remove_flag(container, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_remove_flag(container, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_move_to_index(container, 0);
 
-    // If a field image is provided, display it as background
+    // If a field image is provided, display it as background (square, like
+    // the field, centered like the drawn path)
     if (mFieldImage != nullptr) {
+        int side = static_cast<int>(fieldScale(mScreenWidth, mScreenHeight) * Field::FIELD_LENGTH);
         lv_obj_t* bgImg = lv_image_create(container);
         lv_image_set_src(bgImg, mFieldImage);
-        lv_obj_set_size(bgImg, mScreenWidth, mScreenHeight);
+        lv_obj_set_size(bgImg, side, side);
         lv_obj_align(bgImg, LV_ALIGN_CENTER, 0, 0);
     }
 
@@ -45,11 +62,14 @@ void PathPreview::init(const void* fieldImage, int screenWidth, int screenHeight
     mCanvas = lv_canvas_create(container);
     lv_obj_set_size(mCanvas, mScreenWidth, mScreenHeight);
     lv_obj_align(mCanvas, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_remove_flag(mCanvas, LV_OBJ_FLAG_CLICKABLE);
 
-    // Allocate per-instance canvas buffer: RGB565 = 16 bits per pixel
-    mCanvasBuf.resize(LV_CANVAS_BUF_SIZE(480, 240, 16, LV_DRAW_BUF_STRIDE_ALIGN));
+    // Allocate the per-instance canvas buffer for the ACTUAL canvas size
+    // (a fixed 480x240 buffer overflowed for larger previews). ARGB8888 so the
+    // transparent background shows the field image — RGB565 has no alpha.
+    mCanvasBuf.resize(LV_CANVAS_BUF_SIZE(mScreenWidth, mScreenHeight, 32, LV_DRAW_BUF_STRIDE_ALIGN));
     lv_canvas_set_buffer(mCanvas, mCanvasBuf.data(), mScreenWidth, mScreenHeight,
-                          LV_COLOR_FORMAT_RGB565);
+                          LV_COLOR_FORMAT_ARGB8888);
 
     // Fill with transparent background
     lv_canvas_fill_bg(mCanvas, lv_color_hex(0x000000), LV_OPA_TRANSP);
@@ -187,13 +207,15 @@ void PathPreview::drawRobot(const Pose& pose) {
 }
 
 int PathPreview::fieldXToScreen(float fieldX) const {
-    return static_cast<int>((fieldX + Field::FIELD_HALF) *
-        (static_cast<float>(mScreenWidth) / Field::FIELD_LENGTH));
+    float scale = fieldScale(mScreenWidth, mScreenHeight);
+    float margin = 0.5f * (static_cast<float>(mScreenWidth) - Field::FIELD_LENGTH * scale);
+    return static_cast<int>(margin + (fieldX + Field::FIELD_HALF) * scale);
 }
 
 int PathPreview::fieldYToScreen(float fieldY) const {
-    return static_cast<int>((Field::FIELD_HALF - fieldY) *
-        (static_cast<float>(mScreenHeight) / Field::FIELD_WIDTH));
+    float scale = fieldScale(mScreenWidth, mScreenHeight);
+    float margin = 0.5f * (static_cast<float>(mScreenHeight) - Field::FIELD_WIDTH * scale);
+    return static_cast<int>(margin + (Field::FIELD_HALF - fieldY) * scale);
 }
 
 void PathPreview::animate(int speed) {

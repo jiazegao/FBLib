@@ -213,7 +213,7 @@ inline float botHeadingToTrig(float botDeg) {
 }
 
 // ============================================================================
-// Field geometry constants (VRC 2025-26 "High Stakes" field)
+// Field geometry constants (standard VRC field; perimeter is the same every season)
 // ============================================================================
 
 namespace Field {

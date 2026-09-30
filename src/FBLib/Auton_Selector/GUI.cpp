@@ -166,24 +166,22 @@ void AutonSelector::enableDryRun(Chassis& chassis, PathPreview& preview) {
 
 void AutonSelector::runDryRun() {
     if (mChassis == nullptr || mPreview == nullptr) return;
+    // The preview's motions queue behind real ones; don't freeze the UI
+    // waiting for the robot to finish moving.
+    if (!mChassis->isSettled()) return;
 
-    // Save the robot's REAL pose — the dry-run seeds the simulation with
-    // setPose, which also propagates to odometry and reinitializes MCL
-    // particles. Without restoring afterwards, every preview button press
-    // teleported the robot's localization to the origin.
-    Pose savedPose = mChassis->getPose();
-
+    // Dry-run is scoped to this task: the auton's motions and setPose() calls
+    // below only drive the simulation, while the real robot's localization
+    // and any other task's motions are untouched.
     mPreview->clear();
     mChassis->setDryRun(true);
     mChassis->setPose({0.0f, 0.0f, 0.0f});   // default: origin (simulated)
     forceRunSelected();                        // auton may call setPose to override origin
+    mChassis->waitUntilSettled();              // finish any async motions it left running
     mPreview->setDynamicPath(mChassis->dryRunPath());
     mPreview->draw();
     mChassis->setDryRun(false);
     mChassis->resetDryRunPath();
-
-    // Restore real localization (odometry pose + MCL particles + RCL estimate)
-    mChassis->setPose(savedPose);
 }
 
 // ============================================================================
@@ -214,9 +212,12 @@ void AutonSelector::toggleSkillsCb(lv_event_t* e) {
 }
 
 void AutonSelector::recalibrateCb(lv_event_t* e) {
-    // Placeholder: recalibration is handled externally by the user
-    // This button signals intent via the callback mechanism
-    (void)e;
+    auto* self = static_cast<AutonSelector*>(lv_event_get_user_data(e));
+    // Needs the chassis handed over by enableDryRun(). Never recalibrate while
+    // the robot is moving. Blocks the UI for the ~2 s IMU calibration.
+    if (self->mChassis != nullptr && self->mChassis->isSettled()) {
+        self->mChassis->calibrate();
+    }
 }
 
 // ============================================================================

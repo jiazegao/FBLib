@@ -61,6 +61,7 @@ public:
 
     /// Enable automatic dry-run path generation on selection change.
     /// After calling this, no manual onSelectionChanged wiring is needed.
+    /// Also connects the "Recal" button to chassis.calibrate().
     void enableDryRun(Chassis& chassis, PathPreview& preview);
 
     /// Callback fired when selection changes (in addition to dry-run, if enabled)
