@@ -34,11 +34,15 @@ public:
                   float offsetIn,
                   float gearRatio = 1.0f);
 
-    // Distance traveled in inches since last reset
+    // Distance traveled in inches since last reset.
+    // Vertical wheels must read positive driving forward; horizontal wheels
+    // positive moving LEFT (reverse the sensor if needed).
     float distanceIn() const;
 
     // Offset from robot tracking center (inches)
     // Sign convention: +right/+forward, -left/-backward
+    //   vertical wheel:   lateral offset,      + = right of center
+    //   horizontal wheel: longitudinal offset, + = ahead of center
     float offsetIn() const { return mOffsetIn; }
 
     // Wheel diameter in inches
@@ -97,6 +101,12 @@ struct OdomSensors {
 // ============================================================================
 // OdomTracking — dead-wheel + IMU odometry solver
 // ============================================================================
+//
+// The IMU is authoritative for ROTATION: every update adds the IMU's change
+// in heading to the pose heading. The pose heading itself is whatever the
+// user (or calibrate()) set, so setPose()/setHeading() define which way the
+// robot faces on the field.
+// ============================================================================
 
 class OdomTracking {
 public:
@@ -114,12 +124,11 @@ public:
     // than one task may be calling update().
     void update();
 
-    // Retrieve the decomposed delta from the last update() call.
-    // dVert and dHoriz are independent sensor measurements (not geometrically
-    // decomposed from a fused X/Y pose), allowing per-axis noise in MCL.
+    // Retrieve the decomposed delta from the last update() call: motion of the
+    // tracking center in the robot frame (wheel offsets already removed).
     // WARNING: single-tick only. If update() runs more than once between two
     // reads, the intermediate deltas are LOST. Use consumeDelta() instead.
-    OdomDelta getLastDelta() const { return mLastDelta; }
+    OdomDelta getLastDelta() const;
 
     // Retrieve the ACCUMULATED decomposed delta since the previous call to
     // consumeDelta(), and reset the accumulator. Thread-safe. This is what
@@ -139,11 +148,15 @@ public:
         return !mSensors.vertWheelCollection.empty();
     }
 
-    // Direct pose access
+    // Direct pose access (all thread-safe)
     void setPose(const Pose& pose);
+    void setPosition(float x, float y);       // heading unchanged
+    void setHeading(float thetaRad);          // position unchanged
+    void translate(float dx, float dy);       // atomic position correction (MCL/RCL sync)
     Pose getPose() const;
 
-    // Reset all tracking wheels and zero the pose
+    // Reset all tracking wheels, zero the position and align the heading with
+    // the IMU (IMU 0° = facing +Y)
     void reset();
 
     // Calibrate IMUs (call while robot is stationary)
@@ -171,7 +184,7 @@ private:
     // Previous readings for delta computation
     float mPrevVertDist{0.0f};     // accumulated vertical distance last update
     float mPrevHorizDist{0.0f};    // accumulated horizontal distance last update
-    float mPrevHeadingRad{0.0f};   // IMU heading last update
+    float mPrevRotationDeg{0.0f};  // scaled IMU rotation last update (VEX, CW+)
 
     // Most recent decomposed delta, stored for MCL per-axis noise.
     // Updated at the end of each update() call.
@@ -191,8 +204,13 @@ private:
     // Current horizontal distance: tracking wheels → 0 (tank drives can't strafe)
     float currentHorizDistance() const;
 
-    // Current heading from primary IMU (radians, standard math convention)
-    float currentHeadingRad() const;
+    // Continuous scaled IMU rotation (degrees, VEX clockwise-positive).
+    // Holds the previous value while the IMU reports an error.
+    float currentRotationDeg() const;
+
+    // Offsets of the wheels actually used for each axis (0 for motor encoders)
+    float vertOffset() const;
+    float horizOffset() const;
 };
 
 }  // namespace FBLIB

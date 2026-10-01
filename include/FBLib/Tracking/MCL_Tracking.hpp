@@ -2,6 +2,7 @@
 
 #include <array>
 #include <atomic>
+#include <cstdint>
 #include <random>
 #include <utility>
 #include <vector>
@@ -63,13 +64,21 @@ public:
         float horizDependentVarianceProp = 0.03f;  // multiplied by |dVert|
         float horizConstantNoise = 0.03f;          // inches/update baseline
 
-        float distSyncProp = 0.10f;        // lerp factor for syncing to chassis
-        float thetaSyncProp = 0.001f;
+        float distSyncProp = 0.10f;        // lerp factor for syncing position to chassis
+        float thetaSyncProp = 0.001f;      // unused: heading is never synced (IMU is authoritative)
         float updatePeriodMs = 25.0f;      // background task interval
         int confidenceThreshold = 10;      // min sensor confidence
         float minSensorRange = 1.0f;       // mm — readings below this are invalid
                                            //   (increase if sensors are recessed)
         bool autoSync = true;              // automatically sync pose to odometry
+
+        // How readings are matched against the field (see FieldMap)
+        uint8_t highSensors = 0;           // bit i set: sensor slot i is mounted high
+        float wallAngleSigmaGain = 0.5f;   // a wall reading 45° off square gets
+                                           //   (1 + gain/2)× the sigma
+        float faultTolerance = 0.005f;     // weight factor for a reading beyond 4
+                                           //   sigma of what a particle expects
+                                           //   (e.g. a robot in the beam)
     };
 
     // ========================================================================
@@ -92,6 +101,27 @@ public:
 
     struct CircleObstacle {
         float x, y, radius;
+    };
+
+    /// The season's field elements. Each reading is expected to end at the
+    /// first hit, searching outward in tiers:
+    ///   1. elements at the sensor's height: sensors in Config::highSensors
+    ///      see highLines/highCircles, the others lowLines/lowCircles
+    ///      (e.g. low goal bases pass under high-mounted sensors);
+    ///   2. only if nothing there: universalLines/universalCircles, which
+    ///      every sensor sees (e.g. match loaders);
+    ///   3. only if nothing there either: the walls (built in).
+    /// Within a tier the nearest hit counts, but an earlier tier's hit beats
+    /// a later tier's even if farther, so give the earlier tiers elements
+    /// that are always nearer to the robot, such as goal bases in the middle
+    /// of the field before loaders against the walls.
+    struct FieldMap {
+        std::vector<LineObstacle> highLines;
+        std::vector<CircleObstacle> highCircles;
+        std::vector<LineObstacle> lowLines;
+        std::vector<CircleObstacle> lowCircles;
+        std::vector<LineObstacle> universalLines;
+        std::vector<CircleObstacle> universalCircles;
     };
 
     // ========================================================================
@@ -123,9 +153,9 @@ public:
     // ========================================================================
 
     /// Motion update — propagate particles using decomposed odometry delta.
-    /// Reads the per-axis (vertical, horizontal, angular) delta directly from
-    /// OdomTracking::getLastDelta().  dVert and dHoriz are independent sensor
-    /// measurements, allowing statistically correct per-axis noise.
+    /// Reads the per-axis (vertical, horizontal, angular) delta accumulated
+    /// by OdomTracking::consumeDelta().  dVert and dHoriz are independent
+    /// sensor measurements, allowing statistically correct per-axis noise.
     void predict();
 
     /// Sensor update — weight particles by how well they match sensor readings
@@ -152,7 +182,8 @@ public:
     /// Returns the new estimated pose
     Pose update();
 
-    /// Smoothly interpolate MCL estimate into odometry pose
+    /// Smoothly pull the odometry POSITION toward the MCL estimate. Heading is
+    /// left alone — the IMU is authoritative for orientation.
     void syncToOdometry();
 
     // ========================================================================
@@ -179,9 +210,20 @@ public:
     // Obstacles (for masking out known field elements)
     // ========================================================================
 
-    /// Set dynamic obstacles that sensors should ignore
+    /// Set the season's field elements (see FieldMap)
+    void setFieldMap(const FieldMap& map);
+
+    /// Set disabling obstacles: a sensor whose beam (up to maxSensorRange)
+    /// crosses one is ignored for that update, e.g. to keep the sensors off
+    /// the far side of the field. The vectors must outlive the tracking.
     void setObstacles(const std::vector<LineObstacle>* lineObstacles = nullptr,
                       const std::vector<CircleObstacle>* circleObstacles = nullptr);
+
+    /// What sensor `slot` should read with the robot at `pose`: the distance
+    /// to the first field element or wall in its beam (maxSensorRange if
+    /// nothing is in range), and whether that is a wall. Useful for checking
+    /// a field map against real readings.
+    std::pair<float, bool> expectedReading(const Pose& pose, int slot) const;
 
     /// Set tracking wheel drift compensation
     void setDrift(float verticalDrift, float horizontalDrift);
@@ -217,52 +259,6 @@ private:
     };
 
     // ========================================================================
-    // Field geometry (VRC field — 144" × 144", inner 140.4" × 140.4")
-    //
-    // MODIFY PER SEASON: Update the arrays below to match the current game's
-    // field elements.  Non-disabling obstacles are targets that sensors CAN
-    // detect (cast against during particle weighting).  Disabling obstacles
-    // block sensor view of walls — if a sensor ray hits one, the reading is
-    // marked invalid.
-    // ========================================================================
-
-    /// Field perimeter walls (never changes — 140.4" × 140.4" interior)
-    static constexpr LineObstacle kFieldWalls[4] = {
-        {{-70.2f, -70.2f}, { 70.2f, -70.2f}},  // bottom
-        {{ 70.2f, -70.2f}, { 70.2f,  70.2f}},  // right
-        {{ 70.2f,  70.2f}, {-70.2f,  70.2f}},  // top
-        {{-70.2f,  70.2f}, {-70.2f, -70.2f}}   // left
-    };
-
-    /// Non-disabling line targets — field elements that sensors CAN detect.
-    /// Ray-cast against these (in priority order before walls) when weighting
-    /// particles.  Add goal legs, barriers, etc. for the current season.
-    static constexpr LineObstacle kFieldTargets[] = {
-        // Example — middle goal diagonal legs (2025-26 "High Stakes"):
-        // {{-5.0f,  5.0f}, { 5.0f, -5.0f}},
-        // {{-5.0f, -5.0f}, { 5.0f,  5.0f}},
-        // TODO: add season-specific line targets here
-    };
-
-    /// Non-disabling circle targets — cylindrical field elements sensors can hit.
-    /// Ray-cast against these (before walls) when weighting particles.
-    static constexpr CircleObstacle kFieldCircles[] = {
-        // Match loader posts (4 corners) — present on every VRC field
-        // {-67.635f,  46.765f, 2.00f}, {-67.635f, -46.765f, 2.00f},
-        // { 67.635f,  46.765f, 2.00f}, { 67.635f, -46.765f, 2.00f},
-        // TODO: add season-specific circular targets here
-    };
-
-    /// Disabling line obstacles — if a sensor ray hits one of these BEFORE
-    /// any wall/target, the reading is invalid (not a field-wall measurement).
-    static constexpr LineObstacle kDisablingLines[] = {
-        // Example — center goal structure that blocks sensors:
-        // {{-14.0f, 14.0f}, {14.0f, -14.0f}},
-        // {{-14.0f, -14.0f}, {14.0f, 14.0f}},
-        // TODO: add season-specific disabling obstacles here
-    };
-
-    // ========================================================================
     // Ray-casting helpers
     // ========================================================================
 
@@ -274,8 +270,12 @@ private:
     float intersectCircle(float rayX, float rayY, const CircleObstacle& circle,
                           float maxRange, float dx, float dy) const;
 
-    /// Cast a ray from a particle through a sensor and find nearest obstacle
-    float castRay(const Particle& particle, int sensorIndex) const;
+    /// First hit along a sensor beam, by FieldMap's tiers
+    struct RayHit {
+        float distance;  // maxSensorRange if nothing is in range
+        bool wall;
+    };
+    RayHit castRay(float rayX, float rayY, float rayCos, float raySin, bool highSensor) const;
 
     /// Build the Gaussian probability LUT (sigma is scaled by sensor angle)
     void buildGaussianLUT();
@@ -286,6 +286,18 @@ private:
 
     float nextNoise();
     void regenerateNoise();
+
+    // ========================================================================
+    // Unlocked implementations (caller holds mMutex)
+    // ========================================================================
+
+    void initParticlesAround(const Pose& pose);
+    void scatterParticles();
+    void predictUnlocked();
+    void updateWeightsUnlocked();
+    void resampleUnlocked();
+    std::pair<Pose, float> estimateUnlocked() const;
+    void syncUnlocked();
 
     // ========================================================================
     // Background task
@@ -310,7 +322,10 @@ private:
     std::array<bool, SENSOR_COUNT> mDisabledSensors{};
     std::array<float, SENSOR_COUNT> mDisableTimers{};
 
-    // Obstacle pointers (externally managed)
+    // Season field elements (setFieldMap)
+    FieldMap mFieldMap;
+
+    // Disabling obstacle pointers (externally managed)
     const std::vector<LineObstacle>* mLineObstacles{nullptr};
     const std::vector<CircleObstacle>* mCircleObstacles{nullptr};
 
@@ -344,8 +359,12 @@ private:
     // State
     Pose mLastResamplePose{};
     Pose mRawEstimate{};
-    float mLastImuHeading{0.0f};
     float mLatestSpeed{0.0f};
+
+    // Guards particles, sensor configuration and estimate state: the MCL task
+    // and user tasks (setPose, sensor/obstacle changes) touch them
+    // concurrently. Lock order: this mutex, then OdomTracking's.
+    mutable pros::Mutex mMutex;
 
     // Background task.
     // mRunning is atomic: it's written by stopTracking() (caller task) and

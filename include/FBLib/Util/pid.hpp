@@ -18,7 +18,13 @@ public:
     PIDGains getGains() const;
     void setGains(const PIDGains& gains);
 
+    /// Update with an explicit time step in seconds. Motion controllers use
+    /// this so the loop period (real or simulated) drives the I and D terms.
+    float update(float error, float dt);
+
+    /// Update using the wall clock (pros::millis()) to measure the time step.
     float update(float error);
+
     void reset();
 
     void setFlipReset(bool flipReset);
@@ -33,6 +39,7 @@ private:
     float mPreviousError = 0.0f;
     float mFilteredDerivative = 0.0f;
     float mDerivativeFilter = 0.1f;  // Low-pass filter coefficient (0.0 to 1.0)
+    bool mHasPreviousError = false;  // false until the first update after construction/reset
     uint32_t mPreviousTime = 0;  // Previous time in milliseconds
 };
 }

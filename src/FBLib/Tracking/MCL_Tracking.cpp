@@ -2,11 +2,22 @@
 
 #include <algorithm>
 #include <cmath>
+#include <mutex>
 
 #include "FBLib/Util/FastTrig.hpp"
-#include "pros/llemu.hpp"
 
 namespace FBLIB {
+
+namespace {
+/// Field perimeter walls (never changes — 140.4" × 140.4" interior). The
+/// season's field elements come from setFieldMap().
+constexpr MclTracking::LineObstacle kFieldWalls[4] = {
+    {{-70.2f, -70.2f}, { 70.2f, -70.2f}},  // bottom
+    {{ 70.2f, -70.2f}, { 70.2f,  70.2f}},  // right
+    {{ 70.2f,  70.2f}, {-70.2f,  70.2f}},  // top
+    {{-70.2f,  70.2f}, {-70.2f, -70.2f}}   // left
+};
+}  // namespace
 
 // ============================================================================
 // Ray-casting helpers
@@ -76,6 +87,40 @@ float MclTracking::intersectCircle(float rayX, float rayY,
     return maxRange;
 }
 
+MclTracking::RayHit MclTracking::castRay(float rayX, float rayY, float rayCos, float raySin,
+                                         bool highSensor) const {
+    const float range = mConfig.maxSensorRange;
+    float dist = range;
+
+    // 1) Elements at this sensor's height
+    const auto& lines = highSensor ? mFieldMap.highLines : mFieldMap.lowLines;
+    const auto& circles = highSensor ? mFieldMap.highCircles : mFieldMap.lowCircles;
+    for (const auto& line : lines) {
+        dist = std::min(dist, intersectLine(rayX, rayY, line, range, rayCos, raySin));
+    }
+    for (const auto& circle : circles) {
+        dist = std::min(dist, intersectCircle(rayX, rayY, circle, range, rayCos, raySin));
+    }
+    if (dist < range) return {dist, false};
+
+    // 2) Elements every sensor sees
+    for (const auto& line : mFieldMap.universalLines) {
+        dist = std::min(dist, intersectLine(rayX, rayY, line, range, rayCos, raySin));
+    }
+    for (const auto& circle : mFieldMap.universalCircles) {
+        dist = std::min(dist, intersectCircle(rayX, rayY, circle, range, rayCos, raySin));
+    }
+    if (dist < range) return {dist, false};
+
+    // 3) The walls. A beam leaves the field through one wall, so the first
+    //    one hit is the answer.
+    for (const auto& wall : kFieldWalls) {
+        const float d = intersectLine(rayX, rayY, wall, range, rayCos, raySin);
+        if (d < range) return {d, true};
+    }
+    return {range, false};
+}
+
 // ============================================================================
 // Noise generation
 // ============================================================================
@@ -134,9 +179,6 @@ MclTracking::MclTracking(OdomTracking& odom,
 
     // Build Gaussian LUT
     buildGaussianLUT();
-
-    // Initialize IMU reference
-    mLastImuHeading = mOdom.imuHeadingRad();
 
     // Initialize particles around start pose
     setPose(startPose);
@@ -209,8 +251,16 @@ void MclTracking::run() {
 // ============================================================================
 
 void MclTracking::setPose(const Pose& pose) {
-    mLastImuHeading = mOdom.imuHeadingRad();
+    std::lock_guard<pros::Mutex> lock(mMutex);
+    initParticlesAround(pose);
+}
 
+void MclTracking::uniformReset() {
+    std::lock_guard<pros::Mutex> lock(mMutex);
+    scatterParticles();
+}
+
+void MclTracking::initParticlesAround(const Pose& pose) {
     // Discard motion accumulated before this reposition — it predates the
     // new particle distribution and would otherwise be applied to freshly
     // initialized particles on the next predict().
@@ -231,9 +281,7 @@ void MclTracking::setPose(const Pose& pose) {
     mLatestSpeed = 0.0f;
 }
 
-void MclTracking::uniformReset() {
-    mLastImuHeading = mOdom.imuHeadingRad();
-
+void MclTracking::scatterParticles() {
     std::uniform_real_distribution<float> xDist(-Field::FIELD_HALF_WALL, Field::FIELD_HALF_WALL);
     std::uniform_real_distribution<float> yDist(-Field::FIELD_HALF_WALL, Field::FIELD_HALF_WALL);
     std::normal_distribution<float> tDist(0.0f, PI);
@@ -254,6 +302,11 @@ void MclTracking::uniformReset() {
 // ============================================================================
 
 void MclTracking::predict() {
+    std::lock_guard<pros::Mutex> lock(mMutex);
+    predictUnlocked();
+}
+
+void MclTracking::predictUnlocked() {
     // ========================================================================
     // Motion update using decomposed odometry delta with per-sensor-type noise.
     //
@@ -282,7 +335,10 @@ void MclTracking::predict() {
     // at 25ms) would be silently lost and particles would fall behind.
     OdomDelta delta = mOdom.consumeDelta();
 
-    float currentImuHeadingRad = mOdom.imuHeadingRad();
+    // Particle headings are clamped around the odometry heading: the IMU
+    // measures rotation, and the odometry pose holds it in the FIELD frame
+    // (the raw IMU heading only matches the field until setPose/setHeading).
+    float fieldHeadingRad = mOdom.getPose().theta;
     float dThetaRad = delta.dTheta;
 
     // Update raw estimate heading
@@ -367,24 +423,23 @@ void MclTracking::predict() {
         // Transform local-frame motion to global frame using the
         // particle's own heading (each particle has a different heading,
         // so each transforms the same local delta differently).
-        p.pose.x += localVert * pCos + localHoriz * pSin;
-        p.pose.y += localVert * pSin - localHoriz * pCos;
+        // Local frame matches OdomTracking: vertical = forward, horizontal = LEFT.
+        p.pose.x += localVert * pCos - localHoriz * pSin;
+        p.pose.y += localVert * pSin + localHoriz * pCos;
 
-        // Add second half of rotation and clamp to IMU heading.
-        // Particles cannot deviate arbitrarily far from the IMU —
-        // the IMU is the ground-truth for orientation.
+        // Add second half of rotation and clamp to the odometry heading.
+        // Particles cannot deviate arbitrarily far from it — the IMU is the
+        // ground-truth for orientation.
         // Use angular-distance clamping instead of raw linear clamp —
         // linear clamp breaks near the ±π wrap boundary where a particle's
         // angle may be on the opposite side of the boundary from the IMU.
         {
             float rawTheta = p.pose.theta + halfDThetaRad;
-            float diff = angleDiffRad(currentImuHeadingRad, rawTheta);
+            float diff = angleDiffRad(fieldHeadingRad, rawTheta);
             float clampedDiff = clamp(diff, -mConfig.maxThetaDeviation, mConfig.maxThetaDeviation);
-            p.pose.theta = wrapRad(currentImuHeadingRad + clampedDiff);
+            p.pose.theta = wrapRad(fieldHeadingRad + clampedDiff);
         }
     }
-
-    mLastImuHeading = currentImuHeadingRad;
 }
 
 // ============================================================================
@@ -392,6 +447,11 @@ void MclTracking::predict() {
 // ============================================================================
 
 void MclTracking::updateWeights() {
+    std::lock_guard<pros::Mutex> lock(mMutex);
+    updateWeightsUnlocked();
+}
+
+void MclTracking::updateWeightsUnlocked() {
     float activeSensors = 0.0f;
 
     // Current robot trig (from raw estimate)
@@ -428,19 +488,7 @@ void MclTracking::updateWeights() {
             mValidSensors[i] = false; continue;
         }
 
-        // Check built-in disabling obstacles (modify kDisablingLines per season)
-        {
-            bool disabled = false;
-            for (const auto& line : kDisablingLines) {
-                if (intersectLine(sx, sy, line, mConfig.maxSensorRange, sCos, sSin) < mConfig.maxSensorRange) {
-                    disabled = true;
-                    break;
-                }
-            }
-            if (disabled) { mValidSensors[i] = false; continue; }
-        }
-
-        // Check user-supplied disabling obstacles
+        // Disabling obstacles: any one in the beam disqualifies the reading
         if (mLineObstacles != nullptr) {
             for (const auto& line : *mLineObstacles) {
                 if (intersectLine(sx, sy, line, mConfig.maxSensorRange, sCos, sSin) < mConfig.maxSensorRange) {
@@ -465,26 +513,17 @@ void MclTracking::updateWeights() {
     }
 
     // Compute per-sensor sigma (measurement noise estimate)
-    float invSigmas[SENSOR_COUNT];
+    float invSigmas[SENSOR_COUNT];      // reading ends at a field element
+    float wallInvSigmas[SENSOR_COUNT];  // reading ends at a wall
     float sensorCountMult = (activeSensors > 0.0f) ? std::sqrt(activeSensors * 0.25f) : 1.0f;
 
     for (int i = 0; i < SENSOR_COUNT; i++) {
         if (!mValidSensors[i]) continue;
 
-        // Angle-dependent sigma scaling (sensors are less accurate at glancing angles)
-        float angleOffset = std::fmod(std::fabs(mRawEstimate.theta + mSensorMounts[i].theta), HALF_PI);
-        if (angleOffset > QUARTER_PI) {
-            angleOffset = HALF_PI - angleOffset;
-        }
-        float angleMultiplier = 1.0f + angleOffset * (2.0f / PI * 1.2f);
-
         // Base sigma: close readings have fixed noise, far readings have proportional noise
         float sigma = (mSensorReadingsMm[i] <= 200)
             ? 0.787f   // ~20mm for close readings
             : mSensorReadingsInch[i] * 0.05f;  // 5% of reading for far readings
-
-        // Apply angle-dependent scaling (sensors are less accurate at glancing angles)
-        sigma *= angleMultiplier;
 
         // Confidence scaling for far readings
         if (mSensorReadingsMm[i] > 200) {
@@ -494,6 +533,15 @@ void MclTracking::updateWeights() {
 
         sigma *= sensorCountMult;
         invSigmas[i] = 1.0f / sigma;
+
+        // A beam meeting a wall at a glancing angle reads less reliably. The
+        // walls are axis-aligned, so the angle off square follows from the
+        // heading; it says nothing about how the beam meets a field element.
+        float angleOffset = std::fmod(std::fabs(mRawEstimate.theta + mSensorMounts[i].theta), HALF_PI);
+        if (angleOffset > QUARTER_PI) {
+            angleOffset = HALF_PI - angleOffset;
+        }
+        wallInvSigmas[i] = invSigmas[i] / (1.0f + angleOffset * (2.0f / PI) * mConfig.wallAngleSigmaGain);
     }
 
     // Weight particles
@@ -524,50 +572,39 @@ void MclTracking::updateWeights() {
             float sx = p.pose.x + (mSensorMounts[j].x * pCos - mSensorMounts[j].y * pSin);
             float sy = p.pose.y + (mSensorMounts[j].x * pSin + mSensorMounts[j].y * pCos);
 
-            // Ray cast from particle.
-            // Priority order: line targets → circle targets → field walls.
-            // The first object hit determines the expected distance.
-            float pDist = mConfig.maxSensorRange;
-
-            // 1) Non-disabling line targets (goal legs, barriers, etc.)
-            for (const auto& target : kFieldTargets) {
-                float dist = intersectLine(sx, sy, target, mConfig.maxSensorRange, sCos, sSin);
-                if (dist < pDist) pDist = dist;
-            }
-
-            // 2) Non-disabling circle targets (match loaders, etc.)
-            if (pDist >= mConfig.maxSensorRange - 1e-6f) {
-                for (const auto& circle : kFieldCircles) {
-                    float dist = intersectCircle(sx, sy, circle, mConfig.maxSensorRange, sCos, sSin);
-                    if (dist < pDist) pDist = dist;
-                }
-            }
-
-            // 3) Field walls (always present, lowest priority)
-            if (pDist >= mConfig.maxSensorRange - 1e-6f) {
-                for (const auto& wall : kFieldWalls) {
-                    float dist = intersectLine(sx, sy, wall, mConfig.maxSensorRange, sCos, sSin);
-                    if (dist < pDist) pDist = dist;
-                }
-            }
-
-            // If no object hit at max range, weight is very low
-            if (pDist >= mConfig.maxSensorRange - 1e-6f) {
-                totalWeight *= 0.001f;
-                continue;
-            }
+            // What this particle expects the sensor to read. With nothing in
+            // range it expects maxSensorRange, which a valid reading is far
+            // from, so the particle gets the fault-tolerance weight below.
+            const RayHit hit = castRay(sx, sy, sCos, sSin, ((mConfig.highSensors >> j) & 1u) != 0);
 
             // Compare expected vs actual distance using Gaussian LUT
-            float z = std::fabs(mSensorReadingsInch[j] - pDist) * invSigmas[j];
+            float z = std::fabs(mSensorReadingsInch[j] - hit.distance) *
+                      (hit.wall ? wallInvSigmas[j] : invSigmas[j]);
             int lutIdx = static_cast<int>(z * 256.0f);
 
             if (lutIdx < GAUSSIAN_LUT_SIZE) {
                 totalWeight *= mGaussianLUT[lutIdx];
             } else {
-                totalWeight *= mGaussianLUT[GAUSSIAN_LUT_SIZE - 1] * 0.01f;
+                totalWeight *= mGaussianLUT[GAUSSIAN_LUT_SIZE - 1] * mConfig.faultTolerance;
             }
         }
         p.weight = totalWeight;
+    }
+
+    // Normalize so the best particle has weight 1. Products of several small
+    // per-sensor likelihoods otherwise underflow float precision, and the
+    // squared weights in the N_eff estimate reach zero first. If NO particle
+    // explains the readings (sensors blocked by a robot, bad data), keep the
+    // particles as they are rather than acting on noise.
+    float maxWeight = 0.0f;
+    for (int i = 0; i < mConfig.particleCount; i++) {
+        maxWeight = std::max(maxWeight, particles[i].weight);
+    }
+    if (maxWeight > 1e-30f) {
+        float inv = 1.0f / maxWeight;
+        for (int i = 0; i < mConfig.particleCount; i++) particles[i].weight *= inv;
+    } else {
+        for (int i = 0; i < mConfig.particleCount; i++) particles[i].weight = 1.0f;
     }
 }
 
@@ -576,6 +613,11 @@ void MclTracking::updateWeights() {
 // ============================================================================
 
 void MclTracking::resample() {
+    std::lock_guard<pros::Mutex> lock(mMutex);
+    resampleUnlocked();
+}
+
+void MclTracking::resampleUnlocked() {
     auto& particles = *mParticles;
     auto& newParticles = *mNewParticles;
 
@@ -585,9 +627,12 @@ void MclTracking::resample() {
         totalWeight += particles[i].weight;
     }
 
-    // If all weights are zero, do uniform reset
+    // Degenerate weights carry no information. Scattering the particles over
+    // the whole field here would drag odometry (via sync) toward mid-field;
+    // keep the current cloud and give every particle equal weight instead.
+    // (uniformReset() stays available for deliberate relocalization.)
     if (totalWeight < 1e-20f) {
-        uniformReset();
+        for (int i = 0; i < mConfig.particleCount; i++) particles[i].weight = 1.0f;
         return;
     }
 
@@ -628,6 +673,11 @@ void MclTracking::resample() {
 // ============================================================================
 
 std::pair<Pose, float> MclTracking::getEstimate() const {
+    std::lock_guard<pros::Mutex> lock(mMutex);
+    return estimateUnlocked();
+}
+
+std::pair<Pose, float> MclTracking::estimateUnlocked() const {
     float xSum = 0.0f, ySum = 0.0f;
     float sinSum = 0.0f, cosSum = 0.0f;
     float totalWeight = 0.0f;
@@ -665,6 +715,8 @@ std::pair<Pose, float> MclTracking::getEstimate() const {
 // ============================================================================
 
 Pose MclTracking::update() {
+    std::lock_guard<pros::Mutex> lock(mMutex);
+
     // Update sensor disable timers
     for (int i = 0; i < SENSOR_COUNT; i++) {
         if (mDisableTimers[i] > 0.0f) {
@@ -673,15 +725,14 @@ Pose MclTracking::update() {
         }
     }
 
-    // predict() reads the decomposed delta from OdomTracking::getLastDelta().
-    // The delta was stored during the mOdom.update() call in run() and is
-    // purely physical (raw sensor deltas) — syncToOdometry() setPose calls
-    // cannot contaminate it because mLastDelta is computed from accumulated
-    // tracking-wheel distance differences, not from pose differences.
-    predict();
-    updateWeights();
+    // predict() consumes the decomposed delta accumulated by the odometry
+    // task. It is purely physical (raw sensor deltas) — syncToOdometry()
+    // position corrections cannot contaminate it because it is computed from
+    // sensor differences, not from pose differences.
+    predictUnlocked();
+    updateWeightsUnlocked();
 
-    auto estimate = getEstimate();
+    auto estimate = estimateUnlocked();
 
     // Resample only when N_eff is too low AND robot has moved enough
     float distSinceResample = distanceToPoint(mLastResamplePose, estimate.first.x, estimate.first.y);
@@ -696,20 +747,17 @@ Pose MclTracking::update() {
     }
 
     if (shouldResample) {
-        resample();
+        resampleUnlocked();
         mLastResamplePose = estimate.first;
     }
 
     mRawEstimate = estimate.first;
 
-    // Sync to odometry (modifies mOdom via setPose).
-    // The delta used in predict() comes from OdomTracking::getLastDelta(),
-    // which stores raw sensor deltas (tracking wheel distance differences).
-    // These are unaffected by syncToOdometry() setPose calls — the sensor
-    // readings don't change when the pose is corrected.  This keeps the
-    // next iteration's motion delta free of sync artifacts.
+    // Sync to odometry (corrects mOdom's position). The motion delta used in
+    // predict() is raw sensor differences, unaffected by pose corrections, so
+    // the next iteration stays free of sync artifacts.
     if (mConfig.autoSync) {
-        syncToOdometry();
+        syncUnlocked();
     }
 
     // Regenerate noise pool entries
@@ -726,23 +774,23 @@ Pose MclTracking::update() {
 // ============================================================================
 
 void MclTracking::syncToOdometry() {
+    std::lock_guard<pros::Mutex> lock(mMutex);
+    syncUnlocked();
+}
+
+void MclTracking::syncUnlocked() {
     Pose odomPose = mOdom.getPose();
 
-    // Lerp position
-    float newX = odomPose.x + mConfig.distSyncProp * (mRawEstimate.x - odomPose.x);
-    float newY = odomPose.y + mConfig.distSyncProp * (mRawEstimate.y - odomPose.y);
+    // Lerp position, applied as an atomic correction so odometry motion
+    // integrated between the read above and the write is not lost.
+    float dx = mConfig.distSyncProp * (mRawEstimate.x - odomPose.x);
+    float dy = mConfig.distSyncProp * (mRawEstimate.y - odomPose.y);
+    mOdom.translate(dx, dy);
 
-    // Lerp heading (with wrap)
-    float delta = angleDiffRad(odomPose.theta, mRawEstimate.theta);
-    float newTheta = odomPose.theta + mConfig.thetaSyncProp * delta;
-
-    mOdom.setPose({newX, newY, wrapRad(newTheta)});
-
-    // DO NOT adjust mLastImuHeading here — it tracks the raw IMU reading,
-    // not the odometry heading.  Unlike the reference (which reads the chassis
-    // pose for heading), we read mOdom.imuHeadingRad() in predict().  The raw
-    // IMU value is unaffected by odometry syncs, so shifting mLastImuHeading
-    // would introduce a spurious rotation on the next predict() call.
+    // Heading is not synced: particles are clamped around the odometry
+    // heading, so pulling that heading toward the particles would feed back
+    // on itself. The IMU stays authoritative for orientation
+    // (Config::thetaSyncProp is therefore unused).
 }
 
 // ============================================================================
@@ -750,6 +798,7 @@ void MclTracking::syncToOdometry() {
 // ============================================================================
 
 void MclTracking::setDistanceSensors(const std::array<pros::Distance*, SENSOR_COUNT>& sensors) {
+    std::lock_guard<pros::Mutex> lock(mMutex);
     mDistanceSensors = sensors;
     for (int i = 0; i < SENSOR_COUNT; i++) {
         mDisabledSensors[i] = (sensors[i] == nullptr);
@@ -758,6 +807,7 @@ void MclTracking::setDistanceSensors(const std::array<pros::Distance*, SENSOR_CO
 }
 
 void MclTracking::setSensorMounts(const std::array<Pose, SENSOR_COUNT>& mounts) {
+    std::lock_guard<pros::Mutex> lock(mMutex);
     mSensorMounts = mounts;
     for (int i = 0; i < SENSOR_COUNT; i++) {
         mMountTrigs[i] = {std::cos(mSensorMounts[i].theta),
@@ -767,18 +817,21 @@ void MclTracking::setSensorMounts(const std::array<Pose, SENSOR_COUNT>& mounts) 
 
 void MclTracking::enableSensor(int index) {
     if (index < 0 || index >= SENSOR_COUNT) return;
+    std::lock_guard<pros::Mutex> lock(mMutex);
     mDisabledSensors[index] = false;
     mDisableTimers[index] = 0.0f;
 }
 
 void MclTracking::disableSensor(int index) {
     if (index < 0 || index >= SENSOR_COUNT) return;
+    std::lock_guard<pros::Mutex> lock(mMutex);
     mDisabledSensors[index] = true;
     mDisableTimers[index] = 1e20f;
 }
 
 void MclTracking::disableSensorFor(int index, float durationMs) {
     if (index < 0 || index >= SENSOR_COUNT) return;
+    std::lock_guard<pros::Mutex> lock(mMutex);
     mDisabledSensors[index] = true;
     mDisableTimers[index] = durationMs;
 }
@@ -787,13 +840,32 @@ void MclTracking::disableSensorFor(int index, float durationMs) {
 // Obstacle and drift management
 // ============================================================================
 
+void MclTracking::setFieldMap(const FieldMap& map) {
+    std::lock_guard<pros::Mutex> lock(mMutex);
+    mFieldMap = map;
+}
+
+std::pair<float, bool> MclTracking::expectedReading(const Pose& pose, int slot) const {
+    if (slot < 0 || slot >= SENSOR_COUNT) return {mConfig.maxSensorRange, false};
+    std::lock_guard<pros::Mutex> lock(mMutex);
+    const Pose& mount = mSensorMounts[slot];
+    const float c = std::cos(pose.theta);
+    const float s = std::sin(pose.theta);
+    const float beam = pose.theta + mount.theta;
+    const RayHit hit = castRay(pose.x + mount.x * c - mount.y * s, pose.y + mount.x * s + mount.y * c,
+                               std::cos(beam), std::sin(beam), ((mConfig.highSensors >> slot) & 1u) != 0);
+    return {hit.distance, hit.wall};
+}
+
 void MclTracking::setObstacles(const std::vector<LineObstacle>* lineObstacles,
                                 const std::vector<CircleObstacle>* circleObstacles) {
+    std::lock_guard<pros::Mutex> lock(mMutex);
     mLineObstacles = lineObstacles;
     mCircleObstacles = circleObstacles;
 }
 
 void MclTracking::setDrift(float verticalDrift, float horizontalDrift) {
+    std::lock_guard<pros::Mutex> lock(mMutex);
     // Convert per-second drift to per-update drift
     float updatesPerSec = 1000.0f / mConfig.updatePeriodMs;
     mVertDrift = verticalDrift / updatesPerSec;
@@ -805,6 +877,7 @@ void MclTracking::setDrift(float verticalDrift, float horizontalDrift) {
 // ============================================================================
 
 Pose MclTracking::getRawEstimate() const {
+    std::lock_guard<pros::Mutex> lock(mMutex);
     return mRawEstimate;
 }
 

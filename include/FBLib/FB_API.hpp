@@ -20,7 +20,7 @@
 
 // — Foundation —
 #include "FBLib/Util/Util.hpp"
-#include "FBLib/Util/Pid.hpp"
+#include "FBLib/Util/pid.hpp"
 #include "FBLib/Util/FastTrig.hpp"
 #include "FBLib/Util/ScaledIMU.hpp"
 
@@ -29,7 +29,8 @@
 #include "FBLib/Tracking/RCL_Tracking.hpp"
 #include "FBLib/Tracking/MCL_Tracking.hpp"
 
-// — Movement Control —
+// — Movement Control (one Motion subclass per movement type) —
+#include "FBLib/Movement_Control/Motion.hpp"
 #include "FBLib/Movement_Control/MoveToPoint.hpp"
 #include "FBLib/Movement_Control/TurnToPoint.hpp"
 #include "FBLib/Movement_Control/Arc.hpp"
@@ -37,7 +38,7 @@
 #include "FBLib/Movement_Control/RAMSETE.hpp"
 #include "FBLib/Movement_Control/Velocity_Profiles.hpp"
 
-// — Chassis (integration) —
+// — Chassis (coordination: queue, tasks, timeouts, dry-run) —
 #include "FBLib/Chassis.hpp"
 
 // — Auton Selector —

@@ -213,7 +213,7 @@ inline float botHeadingToTrig(float botDeg) {
 }
 
 // ============================================================================
-// Field geometry constants (VRC 2025-26 "High Stakes" field)
+// Field geometry constants (standard VRC field; perimeter is the same every season)
 // ============================================================================
 
 namespace Field {
@@ -230,13 +230,16 @@ namespace Field {
     // Obstacle lifetime (for dynamic obstacles in RCL)
     constexpr float MAX_OBSTACLE_DURATION_MS = 1e12f;
 
-    // Scale field coordinate to screen pixel (for path preview)
-    // Screen is typically 480x240 on V5 Brain
-    inline float fieldToScreenX(float fieldX, float screenWidth = 480.0f) {
-        return (fieldX + FIELD_HALF) * (screenWidth / FIELD_LENGTH);
+    // Field coordinate -> screen pixel, as drawn by PathPreview: the field is
+    // a square as tall as the shorter screen side, centred (on the 480x240
+    // V5 Brain screen: x 120..360, y 0..240), +Y up.
+    inline float fieldToScreenX(float fieldX, float screenWidth = 480.0f, float screenHeight = 240.0f) {
+        float side = screenWidth < screenHeight ? screenWidth : screenHeight;
+        return 0.5f * (screenWidth - side) + (fieldX + FIELD_HALF) * (side / FIELD_LENGTH);
     }
-    inline float fieldToScreenY(float fieldY, float screenHeight = 240.0f) {
-        return (FIELD_HALF - fieldY) * (screenHeight / FIELD_WIDTH);
+    inline float fieldToScreenY(float fieldY, float screenHeight = 240.0f, float screenWidth = 480.0f) {
+        float side = screenWidth < screenHeight ? screenWidth : screenHeight;
+        return 0.5f * (screenHeight - side) + (FIELD_HALF - fieldY) * (side / FIELD_WIDTH);
     }
 }  // namespace Field
 

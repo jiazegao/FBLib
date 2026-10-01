@@ -72,7 +72,7 @@ public:
     // ========================================================================
 
     struct Config {
-        int sensorCount = MAX_DISTANCE_SENSORS;
+        int sensorCount = MAX_DISTANCE_SENSORS;  // informational: configured sensors (all slots are scanned)
         float maxSyncDist = 5.0f;          // max distance (inches) to sync per update
         float accumulationAlpha = 0.3f;    // exponential moving average factor
         float updatePeriodMs = 10.0f;      // background task interval
@@ -168,17 +168,28 @@ public:
 
     /// Set the RCL internal estimate (called by Chassis::setPose to keep estimates
     /// synchronized)
-    void setRclPose(const Pose& pose) { mLatestEstimate = pose; }
+    void setRclPose(const Pose& pose);
 
     // ========================================================================
     // Accessors
     // ========================================================================
 
+    /// Live sensor state, written by the tracking task (advanced/debug use).
     const std::array<RclSensor, MAX_DISTANCE_SENSORS>& sensors() const { return mSensors; }
-    Pose latestEstimate() const { return mLatestEstimate; }
-    int activeSensorCount() const { return mActiveSensorCount; }
+    Pose latestEstimate() const;
+    int activeSensorCount() const { return mActiveSensorCount.load(); }
 
 private:
+    // ========================================================================
+    // Unlocked implementations (caller holds mMutex)
+    // ========================================================================
+
+    void updateSensorPosesUnlocked(const Pose& robotPose);
+    bool isValidReadingUnlocked(int index) const;
+    std::pair<CoordType, float> botCoordUnlocked(int index) const;
+    std::pair<Pose, int> computePoseUnlocked() const;
+    void syncUnlocked();
+
     // ========================================================================
     // Ray intersection helper
     // ========================================================================
@@ -211,10 +222,16 @@ private:
     std::vector<CircleObstacle> mCircleObstacles;
 
     Pose mLatestEstimate;
-    int mActiveSensorCount{0};
+    std::atomic<int> mActiveSensorCount{0};
 
     // Timed disable support
     std::array<float, MAX_DISTANCE_SENSORS> mDisableTimers{};
+
+    // Guards sensors, obstacles and the estimate: user tasks add/clear
+    // obstacles and reconfigure sensors while the tracking task iterates them
+    // (a vector reallocated mid-iteration is a use-after-free).
+    // Lock order: this mutex, then OdomTracking's.
+    mutable pros::Mutex mMutex;
 
     // mRunning is atomic: written by stopTracking() (caller task), read by
     // the loop in run() (worker task) — a cross-task flag.

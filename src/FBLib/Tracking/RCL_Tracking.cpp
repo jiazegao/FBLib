@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <mutex>
 
 namespace FBLIB {
 
@@ -57,6 +58,7 @@ RclTracking::~RclTracking() {
 
 void RclTracking::setSensor(int index, pros::Distance* sensor, const Pose& mountOffset) {
     if (index < 0 || index >= MAX_DISTANCE_SENSORS) return;
+    std::lock_guard<pros::Mutex> lock(mMutex);
     mSensors[index].sensor = sensor;
     mSensors[index].mountOffset = mountOffset;
     mSensors[index].enabled = true;
@@ -64,6 +66,7 @@ void RclTracking::setSensor(int index, pros::Distance* sensor, const Pose& mount
 
 void RclTracking::configureSensors(const std::array<pros::Distance*, MAX_DISTANCE_SENSORS>& sensors,
                                      const std::array<Pose, MAX_DISTANCE_SENSORS>& mounts) {
+    std::lock_guard<pros::Mutex> lock(mMutex);
     int activeCount = 0;
     for (int i = 0; i < MAX_DISTANCE_SENSORS; i++) {
         if (sensors[i] != nullptr) {
@@ -79,22 +82,26 @@ void RclTracking::configureSensors(const std::array<pros::Distance*, MAX_DISTANC
             mDisableTimers[i]        = 0.0f;
         }
     }
-    // Clamp to [1, MAX_DISTANCE_SENSORS] so loop bounds remain safe
-    mConfig.sensorCount = (activeCount > 0) ? activeCount : 1;
+    // Informational only — every slot is scanned (null/disabled ones are
+    // skipped), so sensors don't have to sit in the first `count` slots.
+    mConfig.sensorCount = activeCount;
 }
 
 void RclTracking::enableSensor(int index) {
     if (index < 0 || index >= MAX_DISTANCE_SENSORS) return;
+    std::lock_guard<pros::Mutex> lock(mMutex);
     mSensors[index].enabled = true;
 }
 
 void RclTracking::disableSensor(int index) {
     if (index < 0 || index >= MAX_DISTANCE_SENSORS) return;
+    std::lock_guard<pros::Mutex> lock(mMutex);
     mSensors[index].enabled = false;
 }
 
 void RclTracking::disableSensorFor(int index, float durationMs) {
     if (index < 0 || index >= MAX_DISTANCE_SENSORS) return;
+    std::lock_guard<pros::Mutex> lock(mMutex);
     mSensors[index].enabled = false;
     mDisableTimers[index] = durationMs;
 }
@@ -104,14 +111,17 @@ void RclTracking::disableSensorFor(int index, float durationMs) {
 // ============================================================================
 
 void RclTracking::addLineObstacle(float x1, float y1, float x2, float y2, float lifetimeMs) {
+    std::lock_guard<pros::Mutex> lock(mMutex);
     mLineObstacles.push_back({x1, y1, x2, y2, lifetimeMs});
 }
 
 void RclTracking::addCircleObstacle(float x, float y, float radius, float lifetimeMs) {
+    std::lock_guard<pros::Mutex> lock(mMutex);
     mCircleObstacles.push_back({x, y, radius, lifetimeMs});
 }
 
 void RclTracking::clearObstacles() {
+    std::lock_guard<pros::Mutex> lock(mMutex);
     mLineObstacles.clear();
     mCircleObstacles.clear();
 }
@@ -121,10 +131,15 @@ void RclTracking::clearObstacles() {
 // ============================================================================
 
 void RclTracking::updateSensorPoses(const Pose& robotPose) {
+    std::lock_guard<pros::Mutex> lock(mMutex);
+    updateSensorPosesUnlocked(robotPose);
+}
+
+void RclTracking::updateSensorPosesUnlocked(const Pose& robotPose) {
     float rCos = std::cos(robotPose.theta);
     float rSin = std::sin(robotPose.theta);
 
-    for (int i = 0; i < mConfig.sensorCount; i++) {
+    for (int i = 0; i < MAX_DISTANCE_SENSORS; i++) {
         auto& s = mSensors[i];
         if (!s.enabled || s.sensor == nullptr) {
             s.valid = false;
@@ -153,6 +168,12 @@ void RclTracking::updateSensorPoses(const Pose& robotPose) {
 // ============================================================================
 
 bool RclTracking::isValidReading(int index) const {
+    if (index < 0 || index >= MAX_DISTANCE_SENSORS) return false;
+    std::lock_guard<pros::Mutex> lock(mMutex);
+    return isValidReadingUnlocked(index);
+}
+
+bool RclTracking::isValidReadingUnlocked(int index) const {
     const auto& s = mSensors[index];
     if (!s.enabled || s.sensor == nullptr) return false;
 
@@ -212,6 +233,12 @@ bool RclTracking::isValidReading(int index) const {
 // ============================================================================
 
 std::pair<CoordType, float> RclTracking::getBotCoordFromSensor(int index) const {
+    if (index < 0 || index >= MAX_DISTANCE_SENSORS) return {CoordType::INVALID, 0.0f};
+    std::lock_guard<pros::Mutex> lock(mMutex);
+    return botCoordUnlocked(index);
+}
+
+std::pair<CoordType, float> RclTracking::botCoordUnlocked(int index) const {
     // ========================================================================
     // Derive robot coordinate from a single sensor intersecting a field wall.
     //
@@ -225,7 +252,7 @@ std::pair<CoordType, float> RclTracking::getBotCoordFromSensor(int index) const 
     // to the wall.
     // ========================================================================
     const auto& s = mSensors[index];
-    if (!isValidReading(index)) return {CoordType::INVALID, 0.0f};
+    if (!isValidReadingUnlocked(index)) return {CoordType::INVALID, 0.0f};
 
     float cosA = s.rayCos;
     float sinA = s.raySin;
@@ -294,6 +321,11 @@ std::pair<CoordType, float> RclTracking::getBotCoordFromSensor(int index) const 
 // ============================================================================
 
 std::pair<Pose, int> RclTracking::computePose() const {
+    std::lock_guard<pros::Mutex> lock(mMutex);
+    return computePoseUnlocked();
+}
+
+std::pair<Pose, int> RclTracking::computePoseUnlocked() const {
     // Independently average X and Y coordinates from different sensors.
     // A sensor pointed at an east/west wall constrains X; a sensor pointed
     // at a north/south wall constrains Y.  The two axes are independent —
@@ -301,8 +333,8 @@ std::pair<Pose, int> RclTracking::computePose() const {
     float sumX = 0.0f, sumY = 0.0f;
     int xCount = 0, yCount = 0;
 
-    for (int i = 0; i < mConfig.sensorCount; i++) {
-        auto [type, coord] = getBotCoordFromSensor(i);
+    for (int i = 0; i < MAX_DISTANCE_SENSORS; i++) {
+        auto [type, coord] = botCoordUnlocked(i);
         if (type == CoordType::X) {
             sumX += coord;
             xCount++;
@@ -313,12 +345,13 @@ std::pair<Pose, int> RclTracking::computePose() const {
     }
 
     // When no sensor constrains an axis, fall back to odometry
-    float estX = (xCount > 0) ? sumX / static_cast<float>(xCount) : mOdom.getPose().x;
-    float estY = (yCount > 0) ? sumY / static_cast<float>(yCount) : mOdom.getPose().y;
+    Pose odomPose = mOdom.getPose();
+    float estX = (xCount > 0) ? sumX / static_cast<float>(xCount) : odomPose.x;
+    float estY = (yCount > 0) ? sumY / static_cast<float>(yCount) : odomPose.y;
     int usedCount = xCount + yCount;
 
     return {
-        {estX, estY, mOdom.getPose().theta},
+        {estX, estY, odomPose.theta},
         usedCount
     };
 }
@@ -328,6 +361,8 @@ std::pair<Pose, int> RclTracking::computePose() const {
 // ============================================================================
 
 void RclTracking::update() {
+    std::lock_guard<pros::Mutex> lock(mMutex);
+
     // Update sensor disable timers
     for (int i = 0; i < MAX_DISTANCE_SENSORS; i++) {
         if (mDisableTimers[i] > 0.0f) {
@@ -340,9 +375,9 @@ void RclTracking::update() {
     }
 
     Pose currentPose = mOdom.getPose();
-    updateSensorPoses(currentPose);
+    updateSensorPosesUnlocked(currentPose);
 
-    auto [estimate, sensorCount] = computePose();
+    auto [estimate, sensorCount] = computePoseUnlocked();
     mActiveSensorCount = sensorCount;
 
     if (sensorCount > 0) {
@@ -384,7 +419,7 @@ void RclTracking::update() {
         mCircleObstacles.end());
 
     if (mConfig.autoSync && sensorCount >= 1) {
-        syncUpdate();
+        syncUnlocked();
     }
 }
 
@@ -393,6 +428,11 @@ void RclTracking::update() {
 // ============================================================================
 
 void RclTracking::syncUpdate() {
+    std::lock_guard<pros::Mutex> lock(mMutex);
+    syncUnlocked();
+}
+
+void RclTracking::syncUnlocked() {
     if (mActiveSensorCount == 0) return;
 
     Pose odomPose = mOdom.getPose();
@@ -406,11 +446,9 @@ void RclTracking::syncUpdate() {
         dy *= scale;
     }
 
-    mOdom.setPose({
-        odomPose.x + dx,
-        odomPose.y + dy,
-        odomPose.theta
-    });
+    // Applied as an atomic correction so motion integrated by the odometry
+    // task between the read above and this write is not lost.
+    mOdom.translate(dx, dy);
 }
 
 // ============================================================================
@@ -418,13 +456,14 @@ void RclTracking::syncUpdate() {
 // ============================================================================
 
 bool RclTracking::updateBotPoseFromBestSensor() {
-    updateSensorPoses(mOdom.getPose());
+    std::lock_guard<pros::Mutex> lock(mMutex);
+    updateSensorPosesUnlocked(mOdom.getPose());
 
     int bestIndex = -1;
     float bestDist = 999.0f;
 
-    for (int i = 0; i < mConfig.sensorCount; i++) {
-        if (isValidReading(i)) {
+    for (int i = 0; i < MAX_DISTANCE_SENSORS; i++) {
+        if (isValidReadingUnlocked(i)) {
             float dist = mSensors[i].readingInch;
             if (dist < bestDist) {
                 bestDist = dist;
@@ -435,19 +474,33 @@ bool RclTracking::updateBotPoseFromBestSensor() {
 
     if (bestIndex < 0) return false;
 
-    auto [type, coord] = getBotCoordFromSensor(bestIndex);
+    auto [type, coord] = botCoordUnlocked(bestIndex);
     if (type == CoordType::INVALID) return false;
 
     // Only update the coordinate that this sensor constrains.
     // The other coordinate stays at the odometry value.
     Pose odomPose = mOdom.getPose();
     if (type == CoordType::X) {
-        mOdom.setPose({coord, odomPose.y, odomPose.theta});
+        mOdom.translate(coord - odomPose.x, 0.0f);
     } else {
-        mOdom.setPose({odomPose.x, coord, odomPose.theta});
+        mOdom.translate(0.0f, coord - odomPose.y);
     }
     mLatestEstimate = mOdom.getPose();
     return true;
+}
+
+// ============================================================================
+// Estimate access
+// ============================================================================
+
+void RclTracking::setRclPose(const Pose& pose) {
+    std::lock_guard<pros::Mutex> lock(mMutex);
+    mLatestEstimate = pose;
+}
+
+Pose RclTracking::latestEstimate() const {
+    std::lock_guard<pros::Mutex> lock(mMutex);
+    return mLatestEstimate;
 }
 
 // ============================================================================
@@ -457,7 +510,7 @@ bool RclTracking::updateBotPoseFromBestSensor() {
 void RclTracking::startTracking() {
     if (mTask == nullptr) {
         mRunning = true;
-        mLatestEstimate = mOdom.getPose();
+        setRclPose(mOdom.getPose());
         mTask = new pros::Task([this]() { run(); });
     }
 }
