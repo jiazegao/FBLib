@@ -6,6 +6,7 @@
 //   src/robot/mechanisms.cpp      intakes, end effector, lift, scoring macros
 //   src/robot/driver.cpp          driver control (button map in driver.hpp)
 //   src/robot/autons.cpp          autonomous routes + localization helpers
+//   src/robot/field_image.c       field picture behind the path preview
 //
 // This file only wires them into the PROS competition lifecycle.
 // ============================================================================
@@ -16,6 +17,7 @@
 #include "robot/autons.hpp"
 #include "robot/config.hpp"
 #include "robot/driver.hpp"
+#include "robot/field_image.h"
 #include "robot/mechanisms.hpp"
 
 using namespace FBLIB;
@@ -33,7 +35,7 @@ void initialize() {
 
     selector.registerAuton("Left 30", left30);
     selector.init();
-    preview.init();
+    preview.init(&robot_field_image);
     selector.enableDryRun(chassis, preview);
 }
 

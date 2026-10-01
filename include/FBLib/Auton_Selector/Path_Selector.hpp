@@ -28,9 +28,10 @@ class AutonSelector;
 //
 // Field: 144" x 144", center (0,0), +Y up → a square area as tall as the
 // shorter screen side, centered (240x240 in the middle of the 480x240 brain
-// screen), with the 24" tiles drawn as a grid. A yellow arrow marks the robot,
-// a red dot the end of the path. The preview sits behind other widgets on the
-// screen and takes no input.
+// screen), showing the field image passed to init(), or else the 24" tiles
+// drawn as a grid. A yellow arrow marks the robot, a red dot the end of the
+// path. The preview sits behind other widgets on the screen and takes no
+// input.
 //
 // Threading: PROS runs LVGL in its own display task without a lock, and an
 // LVGL call from another task while that task is drawing can hang the
@@ -45,7 +46,9 @@ public:
     PathPreview();
 
     /// Create the preview on the active screen, behind the widgets already on
-    /// it. fieldImage: optional LVGL image source, stretched to the field.
+    /// it. fieldImage: optional LVGL image source for the background, framed
+    /// like the field square (144" across, +Y up) and stretched to it. An
+    /// image the square's size (240x240 on the V5) is drawn unscaled.
     void init(const void* fieldImage = nullptr,
               int screenWidth = 480, int screenHeight = 240);
 

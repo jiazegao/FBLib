@@ -252,7 +252,7 @@ void autonomous() {
 }
 ```
 
-The field preview fills the middle 240×240 square of the 480×240 screen, with the 24" tiles drawn as a grid:
+The field preview fills the middle 240×240 square of the 480×240 screen. It shows the field image passed to `preview.init()`, or else the 24" tiles as a grid:
 - **Left column:** the routine name, a button that cycles through the routines, and a status line.
 - **Right column:** buttons for alliance color (none/red/blue), Match/Skills mode and Recal.
 
@@ -276,7 +276,7 @@ The routine itself really executes, so:
 - `setPath(waypoints)` then `draw()` shows a path.
 - `drawRobot(pose)` moves the robot arrow.
 - `animate(speed)` plays the path back (10 = real time). It returns immediately.
-- `init(fieldImage)` takes an optional LVGL image source, stretched to the field square.
+- `init(fieldImage)` takes an optional LVGL image for the background, stretched to the field square. Frame it like the preview: 144" across, the field centre in the middle, +Y up. A 240×240 RGB565 C array, like the template's [field_image.c](src/robot/field_image.c), is drawn as is. A PNG or JPEG also works, but PROS's LVGL has no image cache, so it would be decoded again on every redraw.
 
 **Threading.** PROS runs LVGL in its own display task without a lock. An LVGL call from another task while that task is drawing can hang the program. So the selector and preview build their widgets only in `init()`, which you call from `initialize()`. After that they change the screen only from the display task. Their other methods just record the request, so you can call them from any task.
 
@@ -290,6 +290,7 @@ The routine itself really executes, so:
 | [mechanisms.cpp](src/robot/mechanisms.cpp) | Intakes, end effector (PID and homing), lift (PID hold) and the scoring macros, run by one task |
 | [driver.cpp](src/robot/driver.cpp) | Tank drive and the button map documented in [driver.hpp](include/robot/driver.hpp) |
 | [autons.cpp](src/robot/autons.cpp) | The `Left 30` route, plus `startLocalization()` and `resetFromSensor()` |
+| [field_image.c](src/robot/field_image.c) | The Override field picture behind the path preview |
 | [main.cpp](src/main.cpp) | The PROS lifecycle: calibration, the selector with its preview, autonomous and driver control |
 
 The mechanism functions do nothing during a selector preview, and the routes' waits are skipped there. A preview of `Left 30` therefore takes milliseconds and moves only the simulated drivetrain.

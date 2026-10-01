@@ -297,16 +297,34 @@ void PathPreview::showRobot(const Pose& pose) {
 
     lv_draw_triangle_dsc_t triDsc;
     lv_draw_triangle_dsc_init(&triDsc);
-    triDsc.bg_color = lv_color_hex(0xFFFF00);
     triDsc.bg_opa = LV_OPA_COVER;
 
     // Screen Y points down, so a counter-clockwise field heading is a
     // clockwise screen angle.
     const float a = -pose.theta;
     const float c = static_cast<float>(ROBOT_RADIUS);
-    triDsc.p[0] = point(c + ROBOT_SIZE * std::cos(a), c + ROBOT_SIZE * std::sin(a));
-    triDsc.p[1] = point(c + ROBOT_SIZE * 0.5f * std::cos(a + 2.5f), c + ROBOT_SIZE * 0.5f * std::sin(a + 2.5f));
-    triDsc.p[2] = point(c + ROBOT_SIZE * 0.5f * std::cos(a - 2.5f), c + ROBOT_SIZE * 0.5f * std::sin(a - 2.5f));
+    const lv_point_precise_t arrow[3] = {
+        point(c + ROBOT_SIZE * std::cos(a), c + ROBOT_SIZE * std::sin(a)),
+        point(c + ROBOT_SIZE * 0.5f * std::cos(a + 2.5f), c + ROBOT_SIZE * 0.5f * std::sin(a + 2.5f)),
+        point(c + ROBOT_SIZE * 0.5f * std::cos(a - 2.5f), c + ROBOT_SIZE * 0.5f * std::sin(a - 2.5f)),
+    };
+
+    // A 1 px dark outline (the arrow shifted every way) keeps it visible on
+    // the path and over a field image's yellow elements
+    triDsc.bg_color = lv_color_hex(0x000000);
+    for (int dx = -1; dx <= 1; dx++) {
+        for (int dy = -1; dy <= 1; dy++) {
+            if (dx == 0 && dy == 0) continue;
+            for (int i = 0; i < 3; i++) {
+                triDsc.p[i] = arrow[i];
+                triDsc.p[i].x += dx;
+                triDsc.p[i].y += dy;
+            }
+            lv_draw_triangle(&layer, &triDsc);
+        }
+    }
+    triDsc.bg_color = lv_color_hex(0xFFFF00);
+    for (int i = 0; i < 3; i++) triDsc.p[i] = arrow[i];
     lv_draw_triangle(&layer, &triDsc);
 
     lv_canvas_finish_layer(mRobot, &layer);
