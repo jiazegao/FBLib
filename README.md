@@ -223,7 +223,7 @@ Field geometry:
 ## Autonomous selector and path preview
 
 ```cpp
-AutonSelector selector;
+AutonSelector selector;  // globals: the screen keeps pointers to both
 PathPreview preview;
 
 void leftSide() {
@@ -235,8 +235,8 @@ void leftSide() {
 void initialize() {
     chassis.calibrate();
     selector.registerAuton("Left side", leftSide);  // up to 16 routines
-    selector.init();                                // builds the selector screen
-    preview.init();                                 // field area behind the buttons
+    selector.init();                                // builds and shows the selector screen
+    preview.init();                                 // field square behind the buttons
     selector.enableDryRun(chassis, preview);        // preview on every selection change
 }
 
@@ -245,20 +245,33 @@ void autonomous() {
 }
 ```
 
-On the brain screen, the selector has buttons for alliance color (none/red/blue), routine, Match/Skills mode and Recal. Recal recalibrates the IMU, which takes about 2 s; it needs the chassis passed to `enableDryRun()`.
+The field preview fills the middle 240×240 square of the 480×240 screen, with the 24" tiles drawn as a grid:
+- **Left column:** the routine name, a button that cycles through the routines, and a status line.
+- **Right column:** buttons for alliance color (none/red/blue), Match/Skills mode and Recal.
 
-`runSelected()` does nothing until an alliance is chosen, unless Skills mode is on.
+How the controls behave:
+- **Recal:** recalibrates the IMU, which takes about 2 s. It needs the chassis passed to `enableDryRun()`.
+- **`runSelected()`:** does nothing until an alliance is chosen, unless Skills mode is on. The status line reminds you.
+- **`onSelectionChanged(callback)`:** runs your callback after every change.
 
-To preview, the selector calls your routine in **dry-run mode**:
+To preview, the selector calls your routine in **dry-run mode** from a background task. It does this at start-up and whenever the routine, color or mode changes, since a routine may read `getAlliance()` or `isSkills()` to mirror its path.
 - **Simulated, not executed:** its drive motions run against a simulated robot, and `setPose()` and `getPose()` act on the simulated pose.
-- **Recorded:** the path is recorded and drawn on a square field (240×240 px on the 480×240 screen).
-- **Isolated:** dry-run applies only to the task running the preview, so a real motion running from autonomous or driver control is unaffected. Previews are skipped while a real motion is running.
+- **Recorded:** the path is drawn in green, with a yellow arrow for the robot at the start and a red dot at the end.
+- **Isolated:** dry-run applies only to the preview task. A real motion from autonomous or driver control is unaffected, and `isSettled()` in other tasks ignores the preview.
+- **Only when safe:** under competition control, previews and Recal wait until the robot is disabled. They also wait while a real motion is running.
 
 The routine itself really executes, so:
 - Anything that isn't a chassis motion, such as intake motors or pneumatics, really happens unless you guard it with `chassis.isDryRun()`.
-- A `pros::delay()` really waits, and the screen freezes for that long.
+- A `pros::delay()` really waits, but only in the preview task, so the screen stays responsive.
+- A loop that waits for a sensor (a game object in the intake, say) would never end in a preview. Guard it with `chassis.isDryRun()` too, or every later preview and Recal waits behind it.
 
-`PathPreview::init(fieldImage)` takes an optional LVGL image to draw behind the path.
+`PathPreview` also works on its own:
+- `setPath(waypoints)` then `draw()` shows a path.
+- `drawRobot(pose)` moves the robot arrow.
+- `animate(speed)` plays the path back (10 = real time). It returns immediately.
+- `init(fieldImage)` takes an optional LVGL image source, stretched to the field square.
+
+**Threading.** PROS runs LVGL in its own display task without a lock. An LVGL call from another task while that task is drawing can hang the program. So the selector and preview build their widgets only in `init()`, which you call from `initialize()`. After that they change the screen only from the display task. Their other methods just record the request, so you can call them from any task.
 
 ## Tuning
 
@@ -314,7 +327,7 @@ The `Chassis` constructor starts two tasks:
 - **Odometry**, at 100 Hz: the only caller of `OdomTracking::update()`.
 - **Motion:** the only task that runs motions.
 
-`startTracking()` adds the MCL (40 Hz) and RCL (100 Hz) tasks. The movement, pose, calibration and tracking calls lock the state they share, so you can make them from any task. The selector and preview use LVGL, so call those from one task.
+`startTracking()` adds the MCL (40 Hz) and RCL (100 Hz) tasks. The movement, pose, calibration and tracking calls lock the state they share, so you can make them from any task. The selector adds a preview task for dry runs and Recal, and draws through LVGL timers on the PROS display task.
 
 ## Build
 

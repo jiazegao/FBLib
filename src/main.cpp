@@ -157,7 +157,8 @@ void initialize() {
 
     // Enable automatic dry-run path generation.
     // When the user changes the selected auton, the library runs it in dry-run
-    // mode (motors disabled, pose simulated) and draws the trajectory.
+    // mode in a background task (drive motions and pose simulated) and draws
+    // the trajectory.
     // The auton's own setPose() call (if any) sets the starting position;
     // if the auton doesn't call setPose, the path starts from (0,0,0).
     //selector.enableDryRun(chassis, pathPreview);
@@ -168,7 +169,8 @@ void initialize() {
 /// Path preview is auto-generated via dry-run when the user changes the selection.
 void disabled() {
     while (true) {
-        // — Optional: Animate the recorded dry-run path —
+        // — Optional: replay the recorded dry-run path in a loop —
+        // (returns immediately; ignored while a replay is still running)
         // pathPreview.animate(10);
 
         pros::delay(20);

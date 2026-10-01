@@ -117,12 +117,6 @@ struct ChassisConfig {
     DriveCurve throttleCurve;
     DriveCurve steerCurve;
 
-    // Default movement parameters
-    MoveDistanceParams defaultMoveDistance;
-    MoveToPointParams defaultMoveToPoint;
-    TurntoHeadingParams defaultTurnToHeading;
-    TurnToPointParams defaultTurnToPoint;
-
     // Distance sensors for MCL/RCL tracking
     // Size controlled by MAX_DISTANCE_SENSORS in Util.hpp
     std::array<pros::Distance*, MAX_DISTANCE_SENSORS> distanceSensors{};
@@ -251,13 +245,15 @@ public:
     // Motion Status
     // ========================================================================
 
-    /// True if the current movement has completed
+    /// True when no movement is queued or running. Movements simulated by a
+    /// preview in another task don't count; inside a previewing task only its
+    /// own simulated movements count.
     bool isSettled() const;
 
     /// Cancel the current async movement
     void cancelMotion();
 
-    /// Block until the current movement completes
+    /// Block until isSettled()
     void waitUntilSettled();
 
     /// Wait until the robot has traveled at least `dist` inches
@@ -380,6 +376,7 @@ private:
     std::atomic<uint32_t> mMotionSeqCounter{0};  // last seq assigned at enqueue
     std::atomic<uint32_t> mCompletedSeq{0};      // last seq the task finished
     std::atomic<int> mPendingRealMotions{0};     // queued or running, not simulated
+    std::atomic<uint32_t> mLastDryRunSeq{0};     // seq of the newest simulated motion
     std::queue<MotionRequest> mMotionQueue;
     pros::Mutex mQueueMutex;
     pros::Task* mMotionTask{nullptr};

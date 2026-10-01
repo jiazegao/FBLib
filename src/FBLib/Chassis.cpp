@@ -404,7 +404,8 @@ void Chassis::enqueueMotion(std::unique_ptr<Motion> motion, float timeout, bool 
     req.dryRun = simulate;
     req.timeout = timeout;
     req.motion = std::move(motion);
-    if (!simulate) mPendingRealMotions++;
+    if (simulate) mLastDryRunSeq = seq;
+    else mPendingRealMotions++;
     mMotionQueue.push(std::move(req));
     mQueueMutex.unlock();
     mMotionTask->notify();
@@ -531,9 +532,15 @@ void Chassis::ensureMotionTask() {
 // ========================================================================
 
 bool Chassis::isSettled() const {
-    // Settled once the task has completed every enqueued motion. Using the
-    // sequence ids also covers a motion that is queued but not yet running.
-    return static_cast<int32_t>(mCompletedSeq.load() - mMotionSeqCounter.load()) >= 0;
+    // A previewing task waits for the simulated motions it issued (motions run
+    // in order, so the newest one finishing means all of them have). Using the
+    // sequence id also covers a motion that is queued but not yet running.
+    if (previewing()) {
+        return static_cast<int32_t>(mCompletedSeq.load() - mLastDryRunSeq.load()) >= 0;
+    }
+    // Everyone else sees only the real robot: a preview running in another
+    // task must not look like the drive is busy.
+    return mPendingRealMotions.load() == 0;
 }
 
 void Chassis::cancelMotion() {
