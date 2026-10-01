@@ -2,6 +2,7 @@
 
 #include <array>
 #include <atomic>
+#include <cstdint>
 #include <random>
 #include <utility>
 #include <vector>
@@ -86,12 +87,17 @@ public:
     // Field geometry types (used for ray-casting)
     // ========================================================================
 
+    // `sensors` says which distance sensors the element applies to: bit i =
+    // sensor slot i. Clear the bits of sensors whose beams pass over or under
+    // it (e.g. a low goal base under high-mounted sensors).
     struct LineObstacle {
         Pose p1, p2;
+        uint8_t sensors = 0xFF;
     };
 
     struct CircleObstacle {
         float x, y, radius;
+        uint8_t sensors = 0xFF;
     };
 
     // ========================================================================
@@ -180,7 +186,15 @@ public:
     // Obstacles (for masking out known field elements)
     // ========================================================================
 
-    /// Set dynamic obstacles that sensors should ignore
+    /// Set this season's field elements: whatever inside the walls a distance
+    /// sensor can see (goal bases, match loaders, ...). Particles expect a
+    /// reading to end at the nearest element or wall; the walls are built in.
+    void setFieldElements(const std::vector<LineObstacle>& lines,
+                          const std::vector<CircleObstacle>& circles = {});
+
+    /// Set disabling obstacles: a reading whose ray crosses one is ignored
+    /// (e.g. to keep sensors off the far side of the field). The vectors must
+    /// outlive the tracking.
     void setObstacles(const std::vector<LineObstacle>* lineObstacles = nullptr,
                       const std::vector<CircleObstacle>* circleObstacles = nullptr);
 
@@ -215,52 +229,6 @@ private:
 
     struct Trig {
         float cosVal, sinVal;
-    };
-
-    // ========================================================================
-    // Field geometry (VRC field — 144" × 144", inner 140.4" × 140.4")
-    //
-    // MODIFY PER SEASON: Update the arrays below to match the current game's
-    // field elements.  Non-disabling obstacles are targets that sensors CAN
-    // detect (cast against during particle weighting).  Disabling obstacles
-    // block sensor view of walls — if a sensor ray hits one, the reading is
-    // marked invalid.
-    // ========================================================================
-
-    /// Field perimeter walls (never changes — 140.4" × 140.4" interior)
-    static constexpr LineObstacle kFieldWalls[4] = {
-        {{-70.2f, -70.2f}, { 70.2f, -70.2f}},  // bottom
-        {{ 70.2f, -70.2f}, { 70.2f,  70.2f}},  // right
-        {{ 70.2f,  70.2f}, {-70.2f,  70.2f}},  // top
-        {{-70.2f,  70.2f}, {-70.2f, -70.2f}}   // left
-    };
-
-    /// Non-disabling line targets — field elements that sensors CAN detect.
-    /// Ray-cast against these (in priority order before walls) when weighting
-    /// particles.  Add goal legs, barriers, etc. for the current season.
-    static constexpr LineObstacle kFieldTargets[] = {
-        // Example — center goal diagonal legs (2025-26 "Push Back"):
-        // {{-5.0f,  5.0f}, { 5.0f, -5.0f}},
-        // {{-5.0f, -5.0f}, { 5.0f,  5.0f}},
-        // TODO: add season-specific line targets here
-    };
-
-    /// Non-disabling circle targets — cylindrical field elements sensors can hit.
-    /// Ray-cast against these (before walls) when weighting particles.
-    static constexpr CircleObstacle kFieldCircles[] = {
-        // Match loader posts (4 corners) — present on every VRC field
-        // {-67.635f,  46.765f, 2.00f}, {-67.635f, -46.765f, 2.00f},
-        // { 67.635f,  46.765f, 2.00f}, { 67.635f, -46.765f, 2.00f},
-        // TODO: add season-specific circular targets here
-    };
-
-    /// Disabling line obstacles — if a sensor ray hits one of these BEFORE
-    /// any wall/target, the reading is invalid (not a field-wall measurement).
-    static constexpr LineObstacle kDisablingLines[] = {
-        // Example — center goal structure that blocks sensors:
-        // {{-14.0f, 14.0f}, {14.0f, -14.0f}},
-        // {{-14.0f, -14.0f}, {14.0f, 14.0f}},
-        // TODO: add season-specific disabling obstacles here
     };
 
     // ========================================================================
@@ -323,7 +291,11 @@ private:
     std::array<bool, SENSOR_COUNT> mDisabledSensors{};
     std::array<float, SENSOR_COUNT> mDisableTimers{};
 
-    // Obstacle pointers (externally managed)
+    // Season field elements (setFieldElements)
+    std::vector<LineObstacle> mFieldLines;
+    std::vector<CircleObstacle> mFieldCircles;
+
+    // Disabling obstacle pointers (externally managed)
     const std::vector<LineObstacle>* mLineObstacles{nullptr};
     const std::vector<CircleObstacle>* mCircleObstacles{nullptr};
 

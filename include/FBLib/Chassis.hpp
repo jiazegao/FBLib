@@ -72,10 +72,12 @@ private:
 // DriveCurve — joystick input curve for driver control
 // ============================================================================
 
+// Same formula and parameters as LemLib's ExpoDriveCurve.
 struct DriveCurve {
-    float deadband{15.0f};      // ignore inputs below this
-    float minOutput{20.0f};     // minimum output when above deadband
-    float curve{1.0f};          // 1.0 = linear, >1.0 = exponential, <1.0 = logarithmic
+    float deadband{15.0f};      // ignore inputs at or below this
+    float minOutput{20.0f};     // output just past the deadband
+    float curve{1.0f};          // 1.0 = linear; above 1, gentler near the centre
+                                // (1.05 already halves the output at half stick)
 
     float apply(float input) const;
 };

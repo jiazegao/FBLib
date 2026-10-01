@@ -8,6 +8,17 @@
 
 namespace FBLIB {
 
+namespace {
+/// Field perimeter walls (never changes — 140.4" × 140.4" interior). The
+/// season's field elements come from setFieldElements().
+constexpr MclTracking::LineObstacle kFieldWalls[4] = {
+    {{-70.2f, -70.2f}, { 70.2f, -70.2f}},  // bottom
+    {{ 70.2f, -70.2f}, { 70.2f,  70.2f}},  // right
+    {{ 70.2f,  70.2f}, {-70.2f,  70.2f}},  // top
+    {{-70.2f,  70.2f}, {-70.2f, -70.2f}}   // left
+};
+}  // namespace
+
 // ============================================================================
 // Ray-casting helpers
 // ============================================================================
@@ -443,21 +454,11 @@ void MclTracking::updateWeightsUnlocked() {
             mValidSensors[i] = false; continue;
         }
 
-        // Check built-in disabling obstacles (modify kDisablingLines per season)
-        {
-            bool disabled = false;
-            for (const auto& line : kDisablingLines) {
-                if (intersectLine(sx, sy, line, mConfig.maxSensorRange, sCos, sSin) < mConfig.maxSensorRange) {
-                    disabled = true;
-                    break;
-                }
-            }
-            if (disabled) { mValidSensors[i] = false; continue; }
-        }
-
         // Check user-supplied disabling obstacles
+        const uint8_t bit = static_cast<uint8_t>(1u << i);
         if (mLineObstacles != nullptr) {
             for (const auto& line : *mLineObstacles) {
+                if (!(line.sensors & bit)) continue;
                 if (intersectLine(sx, sy, line, mConfig.maxSensorRange, sCos, sSin) < mConfig.maxSensorRange) {
                     mValidSensors[i] = false;
                     break;
@@ -468,6 +469,7 @@ void MclTracking::updateWeightsUnlocked() {
 
         if (mCircleObstacles != nullptr) {
             for (const auto& circle : *mCircleObstacles) {
+                if (!(circle.sensors & bit)) continue;
                 if (intersectCircle(sx, sy, circle, mConfig.maxSensorRange, sCos, sSin) < mConfig.maxSensorRange) {
                     mValidSensors[i] = false;
                     break;
@@ -539,26 +541,21 @@ void MclTracking::updateWeightsUnlocked() {
             float sx = p.pose.x + (mSensorMounts[j].x * pCos - mSensorMounts[j].y * pSin);
             float sy = p.pose.y + (mSensorMounts[j].x * pSin + mSensorMounts[j].y * pCos);
 
-            // Ray cast from particle.
-            // Priority order: line targets → circle targets → field walls.
-            // The first object hit determines the expected distance.
+            // Ray cast from particle: the reading should end at the nearest
+            // field element this sensor can see, else at a wall (the walls
+            // are always farther than anything inside them).
             float pDist = mConfig.maxSensorRange;
-
-            // 1) Non-disabling line targets (goal legs, barriers, etc.)
-            for (const auto& target : kFieldTargets) {
-                float dist = intersectLine(sx, sy, target, mConfig.maxSensorRange, sCos, sSin);
+            const uint8_t bit = static_cast<uint8_t>(1u << j);
+            for (const auto& line : mFieldLines) {
+                if (!(line.sensors & bit)) continue;
+                float dist = intersectLine(sx, sy, line, mConfig.maxSensorRange, sCos, sSin);
                 if (dist < pDist) pDist = dist;
             }
-
-            // 2) Non-disabling circle targets (match loaders, etc.)
-            if (pDist >= mConfig.maxSensorRange - 1e-6f) {
-                for (const auto& circle : kFieldCircles) {
-                    float dist = intersectCircle(sx, sy, circle, mConfig.maxSensorRange, sCos, sSin);
-                    if (dist < pDist) pDist = dist;
-                }
+            for (const auto& circle : mFieldCircles) {
+                if (!(circle.sensors & bit)) continue;
+                float dist = intersectCircle(sx, sy, circle, mConfig.maxSensorRange, sCos, sSin);
+                if (dist < pDist) pDist = dist;
             }
-
-            // 3) Field walls (always present, lowest priority)
             if (pDist >= mConfig.maxSensorRange - 1e-6f) {
                 for (const auto& wall : kFieldWalls) {
                     float dist = intersectLine(sx, sy, wall, mConfig.maxSensorRange, sCos, sSin);
@@ -833,6 +830,13 @@ void MclTracking::disableSensorFor(int index, float durationMs) {
 // ============================================================================
 // Obstacle and drift management
 // ============================================================================
+
+void MclTracking::setFieldElements(const std::vector<LineObstacle>& lines,
+                                   const std::vector<CircleObstacle>& circles) {
+    std::lock_guard<pros::Mutex> lock(mMutex);
+    mFieldLines = lines;
+    mFieldCircles = circles;
+}
 
 void MclTracking::setObstacles(const std::vector<LineObstacle>* lineObstacles,
                                 const std::vector<CircleObstacle>* circleObstacles) {

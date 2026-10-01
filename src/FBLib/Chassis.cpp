@@ -109,19 +109,17 @@ float Drivetrain::maxSpeedInPerSec() const {
 // ============================================================================
 
 float DriveCurve::apply(float input) const {
-    if (std::fabs(input) < deadband) return 0.0f;
-
-    float sign = (input > 0.0f) ? 1.0f : -1.0f;
-    float absInput = std::fabs(input);
-
-    // Remap [deadband, 127] → [0, 1]
-    float normalized = (absInput - deadband) / (127.0f - deadband);
-
-    // Apply curve: x^curve
-    float curved = std::pow(normalized, curve);
-
-    // Remap back: [minOutput, 127]
-    return sign * (minOutput + curved * (127.0f - minOutput));
+    // LemLib's ExpoDriveCurve, term for term, so curve values tuned in a
+    // LemLib project feel the same here (https://www.desmos.com/calculator/umicbymbnl).
+    if (std::fabs(input) <= deadband) return 0.0f;
+    const float sign = (input > 0.0f) ? 1.0f : -1.0f;
+    const float gain = (curve > 0.0f) ? curve : 1.0f;
+    const float g = std::fabs(input) - deadband;      // input past the deadband
+    const float g127 = 127.0f - deadband;             // ...at full stick
+    if (g127 <= 0.0f) return sign * 127.0f;
+    const float i = std::pow(gain, g - 127.0f) * g;
+    const float i127 = std::pow(gain, g127 - 127.0f) * g127;
+    return sign * ((127.0f - minOutput) * i / i127 + minOutput);
 }
 
 // ============================================================================

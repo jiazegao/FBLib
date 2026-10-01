@@ -47,7 +47,7 @@ void autonomous() {
 }
 ```
 
-[src/main.cpp](src/main.cpp) is a complete robot program using the library.
+[src/main.cpp](src/main.cpp) and [src/robot/](src/robot) are a complete competition program built on the library. See [Competition template](#competition-template).
 
 ## Conventions
 
@@ -217,7 +217,8 @@ void autonomous() {
 
 Field geometry:
 - **Walls:** the 140.4" × 140.4" perimeter is built in.
-- **MCL field elements:** for the current season's game, list them in `kFieldTargets`, `kFieldCircles` and `kDisablingLines` in [MCL_Tracking.hpp](include/FBLib/Tracking/MCL_Tracking.hpp). A sensor whose ray crosses a disabling line is ignored for that update.
+- **MCL field elements:** pass the season's goals, loaders and other elements to `chassis.mcl().setFieldElements(lines, circles)`. Each element has a `sensors` bit mask (bit i = sensor slot i) for the sensors that can see it. For example, a low base passes under high-mounted sensors, so clear their bits. [config.hpp](include/robot/config.hpp) has the 2026-27 map.
+- **MCL disabling lines:** `chassis.mcl().setObstacles(&lines)` sets lines that disqualify any reading whose ray crosses them. Use them, for example, to keep the sensors on the robot's own side of the field.
 - **RCL obstacles:** add sensor-blocking obstacles at runtime with `chassis.rcl().addLineObstacle(...)` or `addCircleObstacle(...)`. A lifetime in ms makes one temporary.
 
 ## Autonomous selector and path preview
@@ -273,6 +274,29 @@ The routine itself really executes, so:
 
 **Threading.** PROS runs LVGL in its own display task without a lock. An LVGL call from another task while that task is drawing can hang the program. So the selector and preview build their widgets only in `init()`, which you call from `initialize()`. After that they change the screen only from the display task. Their other methods just record the request, so you can call them from any task.
 
+## Competition template
+
+[src/main.cpp](src/main.cpp) with [include/robot/](include/robot) and [src/robot/](src/robot) is team 1239E's 2026-27 competition program, ported from LemLib 0.5.6. Copy it as the starting point for your own robot.
+
+| File | Contents |
+|---|---|
+| [config.hpp](include/robot/config.hpp) | Ports, sensor mounts, gains, drive curves and the season's field data |
+| [mechanisms.cpp](src/robot/mechanisms.cpp) | Intakes, end effector (PID and homing), lift (PID hold) and the scoring macros, run by one task |
+| [driver.cpp](src/robot/driver.cpp) | Tank drive and the button map documented in [driver.hpp](include/robot/driver.hpp) |
+| [autons.cpp](src/robot/autons.cpp) | The `Left 30` route, plus `startLocalization()` and `resetFromSensor()` |
+| [main.cpp](src/main.cpp) | The PROS lifecycle: calibration, the selector with its preview, autonomous and driver control |
+
+The mechanism functions do nothing during a selector preview, and the routes' waits are skipped there. A preview of `Left 30` therefore takes milliseconds and moves only the simulated drivetrain.
+
+Porting a LemLib route:
+- **Poses:** `chassis.setPose(x, y, deg)` becomes `chassis.setPose({x, y, vexToStdRad(deg)})`.
+- **Backwards turns:** `turnToPoint(..., {.forwards = false})` becomes `{.offset = 180}`.
+- **Relative moves:** use `moveDistance()`. It measures from where the motion starts, so it stays correct when chained after an async motion.
+- **Gains:** LemLib's derivative is per 10 ms tick, and its angular error is in degrees. Multiply lateral kD by 0.01. Multiply angular kP by 57.3 and angular kD by 0.573.
+- **Drive curves:** `DriveCurve` uses LemLib's `ExpoDriveCurve` formula, so the same three numbers feel the same.
+- **Timing:** with LemLib exit ranges of 0, every motion ran for its full timeout. A LemLib async call also waited for the previous motion before starting. FBLib motions end when they arrive. Where the robot was meant to stay put for the rest of a motion, for example while intaking, `waitUntil(start, ms)` in [autons.cpp](src/robot/autons.cpp) keeps that time.
+- **Direct motor commands during a motion:** these were overwritten by LemLib's motion loop and are overwritten by FBLib's too. Cancel or finish the motion first.
+
 ## Tuning
 
 PID errors are in inches (lateral) and radians (angular); outputs are motor units. The defaults in `ChassisConfig` are lateral kP 10, kD 0.3 and angular kP 100, kD 5. They are reasonable starting points for a 450 rpm drive with 3.25" wheels.
@@ -312,8 +336,9 @@ FBLib/
 │       ├── pid.hpp               ← PID controller
 │       ├── FastTrig.hpp          ← lookup-table sin/cos for MCL
 │       └── ScaledIMU.hpp         ← IMU with a scale correction
+├── include/robot/, src/robot/    ← competition template: config, mechanisms, driver, autons
 ├── src/FBLib/                    ← implementations, same layout as include/FBLib
-└── src/main.cpp                  ← example robot program
+└── src/main.cpp                  ← competition template: PROS lifecycle
 ```
 
 The motion math and the coordination are separate:
