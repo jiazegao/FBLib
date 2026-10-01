@@ -189,7 +189,7 @@ Both use V5 distance sensors to correct the odometry **position**. They never ch
 
 | | How it works |
 |---|---|
-| **MCL** | A 1024-particle filter at 40 Hz. Particles move with odometry and are weighted by comparing each distance reading with a ray cast against the field walls and any field elements you list. It gently pulls the odometry position toward the estimate (10% per update). |
+| **MCL** | A 1024-particle filter at 40 Hz. Particles move with odometry and are weighted by comparing each distance reading with a ray cast against the walls and the season's field map. It gently pulls the odometry position toward the estimate (10% per update). |
 | **RCL** | At 100 Hz, each sensor that points squarely at a wall gives one coordinate (east/west walls → X, north/south → Y), averaged per axis. It moves odometry toward that, at most 5" per update. |
 
 ```cpp
@@ -217,8 +217,14 @@ void autonomous() {
 
 Field geometry:
 - **Walls:** the 140.4" × 140.4" perimeter is built in.
-- **MCL field elements:** pass the season's goals, loaders and other elements to `chassis.mcl().setFieldElements(lines, circles)`. Each element has a `sensors` bit mask (bit i = sensor slot i) for the sensors that can see it. For example, a low base passes under high-mounted sensors, so clear their bits. [config.hpp](include/robot/config.hpp) has the 2026-27 map.
-- **MCL disabling lines:** `chassis.mcl().setObstacles(&lines)` sets lines that disqualify any reading whose ray crosses them. Use them, for example, to keep the sensors on the robot's own side of the field.
+- **MCL field map:** `chassis.mcl().setFieldMap(map)` sets the season's elements, as lines and circles. A particle expects each reading to end at the first thing the beam hits, searched in tiers, each only if the one before hits nothing:
+  1. elements at the sensor's height: `highLines`/`highCircles` for the sensors set in `mclConfig.highSensors` (bit i = slot i), `lowLines`/`lowCircles` for the rest. A low goal base passes under a high sensor's beam.
+  2. `universalLines`/`universalCircles`, which every sensor sees.
+  3. the walls.
+
+  An earlier tier's hit counts even when a later tier's is nearer, so the universal tier suits elements against the walls, such as match loaders. [config.hpp](include/robot/config.hpp) has the 2026-27 map, and `chassis.mcl().expectedReading(pose, slot)` gives what a sensor should read at a pose, for checking a map against real readings.
+- **MCL reading noise:** where a particle expects the beam to end at a wall, the reading is trusted less the further off square the beam meets it (`mclConfig.wallAngleSigmaGain`). A reading far from what a particle expects, say with a robot in the beam, scales the particle's weight down by `mclConfig.faultTolerance` rather than ruling it out.
+- **MCL disabling obstacles:** `chassis.mcl().setObstacles(&lines, &circles)` sets obstacles that disqualify any sensor whose beam crosses one, for that update. Use them, for example, to keep the sensors on the robot's own side of the field.
 - **RCL obstacles:** add sensor-blocking obstacles at runtime with `chassis.rcl().addLineObstacle(...)` or `addCircleObstacle(...)`. A lifetime in ms makes one temporary.
 
 ## Autonomous selector and path preview

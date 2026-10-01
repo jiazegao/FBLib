@@ -71,6 +71,14 @@ public:
         float minSensorRange = 1.0f;       // mm — readings below this are invalid
                                            //   (increase if sensors are recessed)
         bool autoSync = true;              // automatically sync pose to odometry
+
+        // How readings are matched against the field (see FieldMap)
+        uint8_t highSensors = 0;           // bit i set: sensor slot i is mounted high
+        float wallAngleSigmaGain = 0.5f;   // a wall reading 45° off square gets
+                                           //   (1 + gain/2)× the sigma
+        float faultTolerance = 0.005f;     // weight factor for a reading beyond 4
+                                           //   sigma of what a particle expects
+                                           //   (e.g. a robot in the beam)
     };
 
     // ========================================================================
@@ -87,17 +95,33 @@ public:
     // Field geometry types (used for ray-casting)
     // ========================================================================
 
-    // `sensors` says which distance sensors the element applies to: bit i =
-    // sensor slot i. Clear the bits of sensors whose beams pass over or under
-    // it (e.g. a low goal base under high-mounted sensors).
     struct LineObstacle {
         Pose p1, p2;
-        uint8_t sensors = 0xFF;
     };
 
     struct CircleObstacle {
         float x, y, radius;
-        uint8_t sensors = 0xFF;
+    };
+
+    /// The season's field elements. Each reading is expected to end at the
+    /// first hit, searching outward in tiers:
+    ///   1. elements at the sensor's height: sensors in Config::highSensors
+    ///      see highLines/highCircles, the others lowLines/lowCircles
+    ///      (e.g. low goal bases pass under high-mounted sensors);
+    ///   2. only if nothing there: universalLines/universalCircles, which
+    ///      every sensor sees (e.g. match loaders);
+    ///   3. only if nothing there either: the walls (built in).
+    /// Within a tier the nearest hit counts, but an earlier tier's hit beats
+    /// a later tier's even if farther, so give the earlier tiers elements
+    /// that are always nearer to the robot, such as goal bases in the middle
+    /// of the field before loaders against the walls.
+    struct FieldMap {
+        std::vector<LineObstacle> highLines;
+        std::vector<CircleObstacle> highCircles;
+        std::vector<LineObstacle> lowLines;
+        std::vector<CircleObstacle> lowCircles;
+        std::vector<LineObstacle> universalLines;
+        std::vector<CircleObstacle> universalCircles;
     };
 
     // ========================================================================
@@ -186,17 +210,20 @@ public:
     // Obstacles (for masking out known field elements)
     // ========================================================================
 
-    /// Set this season's field elements: whatever inside the walls a distance
-    /// sensor can see (goal bases, match loaders, ...). Particles expect a
-    /// reading to end at the nearest element or wall; the walls are built in.
-    void setFieldElements(const std::vector<LineObstacle>& lines,
-                          const std::vector<CircleObstacle>& circles = {});
+    /// Set the season's field elements (see FieldMap)
+    void setFieldMap(const FieldMap& map);
 
-    /// Set disabling obstacles: a reading whose ray crosses one is ignored
-    /// (e.g. to keep sensors off the far side of the field). The vectors must
-    /// outlive the tracking.
+    /// Set disabling obstacles: a sensor whose beam (up to maxSensorRange)
+    /// crosses one is ignored for that update, e.g. to keep the sensors off
+    /// the far side of the field. The vectors must outlive the tracking.
     void setObstacles(const std::vector<LineObstacle>* lineObstacles = nullptr,
                       const std::vector<CircleObstacle>* circleObstacles = nullptr);
+
+    /// What sensor `slot` should read with the robot at `pose`: the distance
+    /// to the first field element or wall in its beam (maxSensorRange if
+    /// nothing is in range), and whether that is a wall. Useful for checking
+    /// a field map against real readings.
+    std::pair<float, bool> expectedReading(const Pose& pose, int slot) const;
 
     /// Set tracking wheel drift compensation
     void setDrift(float verticalDrift, float horizontalDrift);
@@ -243,8 +270,12 @@ private:
     float intersectCircle(float rayX, float rayY, const CircleObstacle& circle,
                           float maxRange, float dx, float dy) const;
 
-    /// Cast a ray from a particle through a sensor and find nearest obstacle
-    float castRay(const Particle& particle, int sensorIndex) const;
+    /// First hit along a sensor beam, by FieldMap's tiers
+    struct RayHit {
+        float distance;  // maxSensorRange if nothing is in range
+        bool wall;
+    };
+    RayHit castRay(float rayX, float rayY, float rayCos, float raySin, bool highSensor) const;
 
     /// Build the Gaussian probability LUT (sigma is scaled by sensor angle)
     void buildGaussianLUT();
@@ -291,9 +322,8 @@ private:
     std::array<bool, SENSOR_COUNT> mDisabledSensors{};
     std::array<float, SENSOR_COUNT> mDisableTimers{};
 
-    // Season field elements (setFieldElements)
-    std::vector<LineObstacle> mFieldLines;
-    std::vector<CircleObstacle> mFieldCircles;
+    // Season field elements (setFieldMap)
+    FieldMap mFieldMap;
 
     // Disabling obstacle pointers (externally managed)
     const std::vector<LineObstacle>* mLineObstacles{nullptr};

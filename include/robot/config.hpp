@@ -69,9 +69,8 @@ inline pros::Distance backDist(2);
 inline pros::Distance rightDist(3);
 
 // FRONT_L, FRONT_R and BACK sit 9.12" up, LEFT and RIGHT 4.19": the low goal
-// bases pass under the high sensors' beams (see fieldLines below)
+// bases pass under the high sensors' beams (see fieldMap below)
 constexpr uint8_t HIGH_SENSORS = (1u << FRONT_L) | (1u << FRONT_R) | (1u << BACK);
-constexpr uint8_t LOW_SENSORS = (1u << LEFT) | (1u << RIGHT);
 
 // No tracking wheels: the drive motor encoders measure travel
 inline FBLIB::OdomSensors odomSensors = {
@@ -114,7 +113,8 @@ inline FBLIB::ChassisConfig chassisConfig = {
     // one-off wall resets (resetFromSensor)
     .useMclTracking = false,
     .useRclTracking = false,
-    .mclConfig = {.distSyncProp = 0.05f, .confidenceThreshold = 20, .minSensorRange = 10.0f},
+    .mclConfig = {.distSyncProp = 0.05f, .confidenceThreshold = 20, .minSensorRange = 10.0f,
+                  .highSensors = HIGH_SENSORS},
     .rclConfig = {.angleTolerance = 15.0f, .confidenceThreshold = 60, .autoSync = false},
 };
 
@@ -124,37 +124,41 @@ inline FBLIB::Chassis chassis(drivetrain, odomSensors, chassisConfig);
 // Season field data (2026-27)
 // ----------------------------------------------------------------------------
 
-// What the distance sensors can see inside the walls, for MCL
-inline const std::vector<FBLIB::MclTracking::LineObstacle> fieldLines = {
-    // Match loaders, one 4" x 4" box per corner (every sensor)
-    {{70.5f, 56.75f}, {66.5f, 56.75f}},     {{66.5f, 56.75f}, {66.5f, 60.75f}},
-    {{66.5f, 60.75f}, {70.5f, 60.75f}},
-    {{-70.5f, 56.75f}, {-66.5f, 56.75f}},   {{-66.5f, 56.75f}, {-66.5f, 60.75f}},
-    {{-66.5f, 60.75f}, {-70.5f, 60.75f}},
-    {{-70.5f, -56.75f}, {-66.5f, -56.75f}}, {{-66.5f, -56.75f}, {-66.5f, -60.75f}},
-    {{-66.5f, -60.75f}, {-70.5f, -60.75f}},
-    {{70.5f, -56.75f}, {66.5f, -56.75f}},   {{66.5f, -56.75f}, {66.5f, -60.75f}},
-    {{66.5f, -60.75f}, {70.5f, -60.75f}},
+// What the distance sensors can see inside the walls, for MCL. A beam is
+// matched against the elements at its sensor's height first, then the match
+// loaders, then the walls.
+inline const FBLIB::MclTracking::FieldMap fieldMap = {
+    // High sensors: the centre base's post
+    .highLines = {},
+    .highCircles = {{0.0f, 0.0f, 1.594f}},
 
-    // Centre base, low part (low sensors)
-    {{2.806f, 2.806f}, {2.806f, -2.806f}, LOW_SENSORS},
-    {{2.806f, -2.806f}, {-2.806f, -2.806f}, LOW_SENSORS},
-    {{-2.806f, -2.806f}, {-2.806f, 2.806f}, LOW_SENSORS},
-    {{-2.806f, 2.806f}, {2.806f, 2.806f}, LOW_SENSORS},
+    // Low sensors: the centre base's low part and the neutral bases (5" squares)
+    .lowLines = {
+        {{2.806f, 2.806f}, {2.806f, -2.806f}},    {{2.806f, -2.806f}, {-2.806f, -2.806f}},
+        {{-2.806f, -2.806f}, {-2.806f, 2.806f}},  {{-2.806f, 2.806f}, {2.806f, 2.806f}},
+        {{-44.5f, 26.0f}, {-44.5f, 21.0f}},  {{-44.5f, 21.0f}, {-49.5f, 21.0f}},
+        {{-49.5f, 21.0f}, {-49.5f, 26.0f}},  {{-49.5f, 26.0f}, {-44.5f, 26.0f}},
+        {{-21.0f, 49.5f}, {-21.0f, 44.5f}},  {{-21.0f, 44.5f}, {-26.0f, 44.5f}},
+        {{-26.0f, 44.5f}, {-26.0f, 49.5f}},  {{-26.0f, 49.5f}, {-21.0f, 49.5f}},
+        {{44.5f, -26.0f}, {44.5f, -21.0f}},  {{44.5f, -21.0f}, {49.5f, -21.0f}},
+        {{49.5f, -21.0f}, {49.5f, -26.0f}},  {{49.5f, -26.0f}, {44.5f, -26.0f}},
+        {{21.0f, -49.5f}, {21.0f, -44.5f}},  {{21.0f, -44.5f}, {26.0f, -44.5f}},
+        {{26.0f, -44.5f}, {26.0f, -49.5f}},  {{26.0f, -49.5f}, {21.0f, -49.5f}},
+    },
+    .lowCircles = {},
 
-    // Neutral bases, 5" squares (low sensors)
-    {{-44.5f, 26.0f}, {-44.5f, 21.0f}, LOW_SENSORS},  {{-44.5f, 21.0f}, {-49.5f, 21.0f}, LOW_SENSORS},
-    {{-49.5f, 21.0f}, {-49.5f, 26.0f}, LOW_SENSORS},  {{-49.5f, 26.0f}, {-44.5f, 26.0f}, LOW_SENSORS},
-    {{-21.0f, 49.5f}, {-21.0f, 44.5f}, LOW_SENSORS},  {{-21.0f, 44.5f}, {-26.0f, 44.5f}, LOW_SENSORS},
-    {{-26.0f, 44.5f}, {-26.0f, 49.5f}, LOW_SENSORS},  {{-26.0f, 49.5f}, {-21.0f, 49.5f}, LOW_SENSORS},
-    {{44.5f, -26.0f}, {44.5f, -21.0f}, LOW_SENSORS},  {{44.5f, -21.0f}, {49.5f, -21.0f}, LOW_SENSORS},
-    {{49.5f, -21.0f}, {49.5f, -26.0f}, LOW_SENSORS},  {{49.5f, -26.0f}, {44.5f, -26.0f}, LOW_SENSORS},
-    {{21.0f, -49.5f}, {21.0f, -44.5f}, LOW_SENSORS},  {{21.0f, -44.5f}, {26.0f, -44.5f}, LOW_SENSORS},
-    {{26.0f, -44.5f}, {26.0f, -49.5f}, LOW_SENSORS},  {{26.0f, -49.5f}, {21.0f, -49.5f}, LOW_SENSORS},
-};
-
-inline const std::vector<FBLIB::MclTracking::CircleObstacle> fieldCircles = {
-    {0.0f, 0.0f, 1.594f, HIGH_SENSORS},  // centre base post, above the low part
+    // Every sensor: the match loaders, one 4" x 4" box per corner
+    .universalLines = {
+        {{70.5f, 56.75f}, {66.5f, 56.75f}},     {{66.5f, 56.75f}, {66.5f, 60.75f}},
+        {{66.5f, 60.75f}, {70.5f, 60.75f}},
+        {{-70.5f, 56.75f}, {-66.5f, 56.75f}},   {{-66.5f, 56.75f}, {-66.5f, 60.75f}},
+        {{-66.5f, 60.75f}, {-70.5f, 60.75f}},
+        {{-70.5f, -56.75f}, {-66.5f, -56.75f}}, {{-66.5f, -56.75f}, {-66.5f, -60.75f}},
+        {{-66.5f, -60.75f}, {-70.5f, -60.75f}},
+        {{70.5f, -56.75f}, {66.5f, -56.75f}},   {{66.5f, -56.75f}, {66.5f, -60.75f}},
+        {{66.5f, -60.75f}, {70.5f, -60.75f}},
+    },
+    .universalCircles = {},
 };
 
 // Goal bases block wall readings for RCL resets: {x, y, radius}

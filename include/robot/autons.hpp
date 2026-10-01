@@ -10,8 +10,8 @@
 
 namespace robot {
 
-/// Give MCL the season's field elements and RCL the goal bases that block
-/// wall readings. Call once from initialize().
+/// Give MCL the season's field map and RCL the goal bases that block wall
+/// readings. Call once from initialize().
 void initLocalization();
 
 /// Route start: set the starting pose, square one coordinate up on a wall

@@ -41,7 +41,7 @@ void waitUntil(uint32_t start, uint32_t ms) {
 // ============================================================================
 
 void initLocalization() {
-    chassis.mcl().setFieldElements(fieldLines, fieldCircles);
+    chassis.mcl().setFieldMap(fieldMap);
     for (const auto& base : rclBlockers) {
         chassis.rcl().addCircleObstacle(base.x, base.y, base.radius);
     }

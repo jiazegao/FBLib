@@ -10,7 +10,7 @@ namespace FBLIB {
 
 namespace {
 /// Field perimeter walls (never changes — 140.4" × 140.4" interior). The
-/// season's field elements come from setFieldElements().
+/// season's field elements come from setFieldMap().
 constexpr MclTracking::LineObstacle kFieldWalls[4] = {
     {{-70.2f, -70.2f}, { 70.2f, -70.2f}},  // bottom
     {{ 70.2f, -70.2f}, { 70.2f,  70.2f}},  // right
@@ -85,6 +85,40 @@ float MclTracking::intersectCircle(float rayX, float rayY,
     if (t1 >= 0.0f && t1 <= maxRange) return t1;
     if (t2 >= 0.0f && t2 <= maxRange) return t2;
     return maxRange;
+}
+
+MclTracking::RayHit MclTracking::castRay(float rayX, float rayY, float rayCos, float raySin,
+                                         bool highSensor) const {
+    const float range = mConfig.maxSensorRange;
+    float dist = range;
+
+    // 1) Elements at this sensor's height
+    const auto& lines = highSensor ? mFieldMap.highLines : mFieldMap.lowLines;
+    const auto& circles = highSensor ? mFieldMap.highCircles : mFieldMap.lowCircles;
+    for (const auto& line : lines) {
+        dist = std::min(dist, intersectLine(rayX, rayY, line, range, rayCos, raySin));
+    }
+    for (const auto& circle : circles) {
+        dist = std::min(dist, intersectCircle(rayX, rayY, circle, range, rayCos, raySin));
+    }
+    if (dist < range) return {dist, false};
+
+    // 2) Elements every sensor sees
+    for (const auto& line : mFieldMap.universalLines) {
+        dist = std::min(dist, intersectLine(rayX, rayY, line, range, rayCos, raySin));
+    }
+    for (const auto& circle : mFieldMap.universalCircles) {
+        dist = std::min(dist, intersectCircle(rayX, rayY, circle, range, rayCos, raySin));
+    }
+    if (dist < range) return {dist, false};
+
+    // 3) The walls. A beam leaves the field through one wall, so the first
+    //    one hit is the answer.
+    for (const auto& wall : kFieldWalls) {
+        const float d = intersectLine(rayX, rayY, wall, range, rayCos, raySin);
+        if (d < range) return {d, true};
+    }
+    return {range, false};
 }
 
 // ============================================================================
@@ -454,11 +488,9 @@ void MclTracking::updateWeightsUnlocked() {
             mValidSensors[i] = false; continue;
         }
 
-        // Check user-supplied disabling obstacles
-        const uint8_t bit = static_cast<uint8_t>(1u << i);
+        // Disabling obstacles: any one in the beam disqualifies the reading
         if (mLineObstacles != nullptr) {
             for (const auto& line : *mLineObstacles) {
-                if (!(line.sensors & bit)) continue;
                 if (intersectLine(sx, sy, line, mConfig.maxSensorRange, sCos, sSin) < mConfig.maxSensorRange) {
                     mValidSensors[i] = false;
                     break;
@@ -469,7 +501,6 @@ void MclTracking::updateWeightsUnlocked() {
 
         if (mCircleObstacles != nullptr) {
             for (const auto& circle : *mCircleObstacles) {
-                if (!(circle.sensors & bit)) continue;
                 if (intersectCircle(sx, sy, circle, mConfig.maxSensorRange, sCos, sSin) < mConfig.maxSensorRange) {
                     mValidSensors[i] = false;
                     break;
@@ -482,26 +513,17 @@ void MclTracking::updateWeightsUnlocked() {
     }
 
     // Compute per-sensor sigma (measurement noise estimate)
-    float invSigmas[SENSOR_COUNT];
+    float invSigmas[SENSOR_COUNT];      // reading ends at a field element
+    float wallInvSigmas[SENSOR_COUNT];  // reading ends at a wall
     float sensorCountMult = (activeSensors > 0.0f) ? std::sqrt(activeSensors * 0.25f) : 1.0f;
 
     for (int i = 0; i < SENSOR_COUNT; i++) {
         if (!mValidSensors[i]) continue;
 
-        // Angle-dependent sigma scaling (sensors are less accurate at glancing angles)
-        float angleOffset = std::fmod(std::fabs(mRawEstimate.theta + mSensorMounts[i].theta), HALF_PI);
-        if (angleOffset > QUARTER_PI) {
-            angleOffset = HALF_PI - angleOffset;
-        }
-        float angleMultiplier = 1.0f + angleOffset * (2.0f / PI * 1.2f);
-
         // Base sigma: close readings have fixed noise, far readings have proportional noise
         float sigma = (mSensorReadingsMm[i] <= 200)
             ? 0.787f   // ~20mm for close readings
             : mSensorReadingsInch[i] * 0.05f;  // 5% of reading for far readings
-
-        // Apply angle-dependent scaling (sensors are less accurate at glancing angles)
-        sigma *= angleMultiplier;
 
         // Confidence scaling for far readings
         if (mSensorReadingsMm[i] > 200) {
@@ -511,6 +533,15 @@ void MclTracking::updateWeightsUnlocked() {
 
         sigma *= sensorCountMult;
         invSigmas[i] = 1.0f / sigma;
+
+        // A beam meeting a wall at a glancing angle reads less reliably. The
+        // walls are axis-aligned, so the angle off square follows from the
+        // heading; it says nothing about how the beam meets a field element.
+        float angleOffset = std::fmod(std::fabs(mRawEstimate.theta + mSensorMounts[i].theta), HALF_PI);
+        if (angleOffset > QUARTER_PI) {
+            angleOffset = HALF_PI - angleOffset;
+        }
+        wallInvSigmas[i] = invSigmas[i] / (1.0f + angleOffset * (2.0f / PI) * mConfig.wallAngleSigmaGain);
     }
 
     // Weight particles
@@ -541,42 +572,20 @@ void MclTracking::updateWeightsUnlocked() {
             float sx = p.pose.x + (mSensorMounts[j].x * pCos - mSensorMounts[j].y * pSin);
             float sy = p.pose.y + (mSensorMounts[j].x * pSin + mSensorMounts[j].y * pCos);
 
-            // Ray cast from particle: the reading should end at the nearest
-            // field element this sensor can see, else at a wall (the walls
-            // are always farther than anything inside them).
-            float pDist = mConfig.maxSensorRange;
-            const uint8_t bit = static_cast<uint8_t>(1u << j);
-            for (const auto& line : mFieldLines) {
-                if (!(line.sensors & bit)) continue;
-                float dist = intersectLine(sx, sy, line, mConfig.maxSensorRange, sCos, sSin);
-                if (dist < pDist) pDist = dist;
-            }
-            for (const auto& circle : mFieldCircles) {
-                if (!(circle.sensors & bit)) continue;
-                float dist = intersectCircle(sx, sy, circle, mConfig.maxSensorRange, sCos, sSin);
-                if (dist < pDist) pDist = dist;
-            }
-            if (pDist >= mConfig.maxSensorRange - 1e-6f) {
-                for (const auto& wall : kFieldWalls) {
-                    float dist = intersectLine(sx, sy, wall, mConfig.maxSensorRange, sCos, sSin);
-                    if (dist < pDist) pDist = dist;
-                }
-            }
-
-            // If no object hit at max range, weight is very low
-            if (pDist >= mConfig.maxSensorRange - 1e-6f) {
-                totalWeight *= 0.001f;
-                continue;
-            }
+            // What this particle expects the sensor to read. With nothing in
+            // range it expects maxSensorRange, which a valid reading is far
+            // from, so the particle gets the fault-tolerance weight below.
+            const RayHit hit = castRay(sx, sy, sCos, sSin, ((mConfig.highSensors >> j) & 1u) != 0);
 
             // Compare expected vs actual distance using Gaussian LUT
-            float z = std::fabs(mSensorReadingsInch[j] - pDist) * invSigmas[j];
+            float z = std::fabs(mSensorReadingsInch[j] - hit.distance) *
+                      (hit.wall ? wallInvSigmas[j] : invSigmas[j]);
             int lutIdx = static_cast<int>(z * 256.0f);
 
             if (lutIdx < GAUSSIAN_LUT_SIZE) {
                 totalWeight *= mGaussianLUT[lutIdx];
             } else {
-                totalWeight *= mGaussianLUT[GAUSSIAN_LUT_SIZE - 1] * 0.01f;
+                totalWeight *= mGaussianLUT[GAUSSIAN_LUT_SIZE - 1] * mConfig.faultTolerance;
             }
         }
         p.weight = totalWeight;
@@ -831,11 +840,21 @@ void MclTracking::disableSensorFor(int index, float durationMs) {
 // Obstacle and drift management
 // ============================================================================
 
-void MclTracking::setFieldElements(const std::vector<LineObstacle>& lines,
-                                   const std::vector<CircleObstacle>& circles) {
+void MclTracking::setFieldMap(const FieldMap& map) {
     std::lock_guard<pros::Mutex> lock(mMutex);
-    mFieldLines = lines;
-    mFieldCircles = circles;
+    mFieldMap = map;
+}
+
+std::pair<float, bool> MclTracking::expectedReading(const Pose& pose, int slot) const {
+    if (slot < 0 || slot >= SENSOR_COUNT) return {mConfig.maxSensorRange, false};
+    std::lock_guard<pros::Mutex> lock(mMutex);
+    const Pose& mount = mSensorMounts[slot];
+    const float c = std::cos(pose.theta);
+    const float s = std::sin(pose.theta);
+    const float beam = pose.theta + mount.theta;
+    const RayHit hit = castRay(pose.x + mount.x * c - mount.y * s, pose.y + mount.x * s + mount.y * c,
+                               std::cos(beam), std::sin(beam), ((mConfig.highSensors >> slot) & 1u) != 0);
+    return {hit.distance, hit.wall};
 }
 
 void MclTracking::setObstacles(const std::vector<LineObstacle>* lineObstacles,
